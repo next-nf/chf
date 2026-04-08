@@ -1,0 +1,14 @@
+## Name of the node
+-sname chf
+
+## Cookie for distributed Erlang
+-setcookie next-chf-cookie
+
+## Enable SMP
+-smp
+
+## Use kernel poll
++K true
+
+## Async IO threads
++A30

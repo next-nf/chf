@@ -1,0 +1,7 @@
+{application, chf_diameter, [
+    {vsn, semver},
+    {description, "Next-CHF DIAMETER Interface (Gy/Rf)"},
+    {applications, [kernel, stdlib, diameter, chf_core]},
+    {mod, {chf_diameter_app, []}},
+    {registered, []}
+]}.

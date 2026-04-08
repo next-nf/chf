@@ -1,0 +1,7 @@
+{application, chf_core, [
+    {vsn, semver},
+    {description, "Next-CHF Core Charging Engine"},
+    {applications, [kernel, stdlib, chf_db]},
+    {mod, {chf_core_app, []}},
+    {registered, []}
+]}.

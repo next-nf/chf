@@ -1,0 +1,7 @@
+{application, chf_api, [
+    {vsn, semver},
+    {description, "Next-CHF 5G Nchf REST APIs"},
+    {applications, [kernel, stdlib, cowboy, chf_core]},
+    {mod, {chf_api_app, []}},
+    {registered, []}
+]}.

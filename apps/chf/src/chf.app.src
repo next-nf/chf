@@ -1,0 +1,10 @@
+{application, chf, [
+    {vsn, semver},
+    {description, "Next-CHF - 3GPP Combined CHF/OCS/OFCS"},
+    {applications, [kernel, stdlib, crypto,
+                    cowboy, prometheus, prometheus_cowboy,
+                    chf_db, chf_core, chf_diameter,
+                    chf_api, chf_provision, chf_web]},
+    {mod, {chf_app, []}},
+    {registered, []}
+]}.

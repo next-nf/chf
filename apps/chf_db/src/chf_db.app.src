@@ -1,0 +1,7 @@
+{application, chf_db, [
+    {vsn, semver},
+    {description, "Next-CHF Database Layer"},
+    {applications, [kernel, stdlib, mnesia]},
+    {mod, {chf_db_app, []}},
+    {registered, []}
+]}.

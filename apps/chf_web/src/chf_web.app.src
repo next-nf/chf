@@ -1,0 +1,7 @@
+{application, chf_web, [
+    {vsn, semver},
+    {description, "Next-CHF Web Management Interface"},
+    {applications, [kernel, stdlib, cowboy, chf_core, chf_db]},
+    {mod, {chf_web_app, []}},
+    {registered, []}
+]}.

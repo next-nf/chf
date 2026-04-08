@@ -1,0 +1,7 @@
+{application, chf_provision, [
+    {vsn, semver},
+    {description, "Next-CHF Provisioning REST API"},
+    {applications, [kernel, stdlib, cowboy, chf_db]},
+    {mod, {chf_provision_app, []}},
+    {registered, []}
+]}.
