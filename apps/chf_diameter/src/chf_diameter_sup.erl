@@ -13,5 +13,12 @@ init([]) ->
         intensity => 5,
         period    => 10
     },
-    ChildSpecs = [],
+    ChildSpecs = [
+        #{id       => chf_diameter_srv,
+          start    => {chf_diameter_srv, start_link, []},
+          restart  => permanent,
+          shutdown => 5000,
+          type     => worker,
+          modules  => [chf_diameter_srv]}
+    ],
     {ok, {SupFlags, ChildSpecs}}.
