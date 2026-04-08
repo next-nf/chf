@@ -1,281 +1,208 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Next-CHF Management Console</title>
+  <link rel="stylesheet" href="/static/vendor/pico.min.css" />
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --pico-font-size: 93.75%;
+    }
+    nav.top-bar {
+      background: var(--pico-primary-background);
+      color: var(--pico-primary-inverse);
+      padding: .75rem 1.5rem;
+      display: flex; align-items: center; gap: 1rem;
+    }
+    nav.top-bar h1 { font-size: 1.15rem; margin: 0; color: inherit; }
+    nav.top-bar .live-badge {
+      background: #2ecc71; color: #fff;
+      border-radius: 4px; padding: 2px 8px;
+      font-size: .65rem; font-weight: 700; text-transform: uppercase;
+    }
+    nav.top-bar .ts { margin-left: auto; font-size: .78rem; opacity: .7; }
 
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #f4f6f9;
-      color: #222;
-      min-height: 100vh;
+    /* KPI cards */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: .75rem;
     }
-
-    header {
-      background: #1a2842;
-      color: #fff;
-      padding: 16px 24px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
+    .kpi-card {
+      background: var(--pico-card-background-color);
+      border: 1px solid var(--pico-muted-border-color);
+      border-radius: var(--pico-border-radius);
+      padding: .9rem 1rem;
     }
-    header h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: .02em; }
-    header .badge {
-      background: #2ecc71;
-      border-radius: 4px;
-      padding: 2px 8px;
-      font-size: .7rem;
-      font-weight: 700;
-      letter-spacing: .05em;
-      text-transform: uppercase;
+    .kpi-card .label {
+      font-size: .7rem; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--pico-muted-color); margin-bottom: .3rem;
     }
-    header .refresh-info {
-      margin-left: auto;
-      font-size: .8rem;
-      color: #adb5c6;
-    }
-
-    main { padding: 24px; display: grid; gap: 24px; }
-
-    .card {
-      background: #fff;
-      border-radius: 8px;
-      box-shadow: 0 1px 4px rgba(0,0,0,.08);
-      overflow: hidden;
-    }
-    .card-header {
-      background: #f8f9fb;
-      border-bottom: 1px solid #e3e6ec;
-      padding: 12px 20px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .card-header h2 { font-size: .95rem; font-weight: 600; color: #1a2842; }
-    .card-header .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #2ecc71;
-      display: inline-block;
-    }
-    .card-body { padding: 20px; }
-
-    /* KPI grid */
-    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; }
-    .kpi {
-      background: #f4f6f9;
-      border-radius: 6px;
-      padding: 14px 16px;
-    }
-    .kpi .label { font-size: .72rem; color: #6b7280; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
-    .kpi .value { font-size: 1.4rem; font-weight: 700; color: #1a2842; }
-    .kpi .unit  { font-size: .75rem; color: #6b7280; margin-left: 2px; }
+    .kpi-card .value { font-size: 1.4rem; font-weight: 700; }
+    .kpi-card .unit  { font-size: .75rem; color: var(--pico-muted-color); }
 
     /* Memory bar */
-    .mem-bar-wrap { margin-top: 16px; }
-    .mem-bar-label { font-size: .8rem; color: #6b7280; margin-bottom: 4px; display: flex; justify-content: space-between; }
-    .mem-bar { height: 8px; background: #e3e6ec; border-radius: 4px; overflow: hidden; }
-    .mem-bar-fill { height: 100%; background: #3b82f6; border-radius: 4px; transition: width .4s; }
-
-    /* Tables */
-    table { width: 100%; border-collapse: collapse; font-size: .875rem; }
-    th { text-align: left; padding: 8px 12px; background: #f4f6f9; color: #6b7280; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid #e3e6ec; }
-    td { padding: 8px 12px; border-bottom: 1px solid #f0f2f5; }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: #fafbfd; }
+    .mem-bar { height: 8px; background: var(--pico-muted-border-color); border-radius: 4px; overflow: hidden; margin-top: .5rem; }
+    .mem-bar-fill { height: 100%; background: var(--pico-primary); border-radius: 4px; transition: width .4s; }
+    .mem-legend { font-size: .78rem; color: var(--pico-muted-color); margin-top: .3rem; }
 
     /* Tags */
     .tag {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 12px;
-      font-size: .72rem;
-      font-weight: 600;
+      display: inline-block; padding: 2px 8px; border-radius: 12px;
+      font-size: .7rem; font-weight: 600;
     }
     .tag-active    { background: #d1fae5; color: #065f46; }
     .tag-online    { background: #dbeafe; color: #1e40af; }
     .tag-offline   { background: #fef3c7; color: #92400e; }
     .tag-converged { background: #ede9fe; color: #5b21b6; }
 
-    /* Filter row */
-    .filter-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
-    .filter-row input, .filter-row select, .filter-row button {
-      padding: 7px 12px;
-      border: 1px solid #d1d5db;
-      border-radius: 6px;
-      font-size: .875rem;
-      outline: none;
-    }
-    .filter-row input:focus, .filter-row select:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.15); }
-    .filter-row button {
-      background: #1a2842;
-      color: #fff;
-      border: none;
-      cursor: pointer;
-      font-weight: 600;
-    }
-    .filter-row button:hover { background: #243b5e; }
-
-    /* Session list */
-    .session-list { display: flex; flex-wrap: wrap; gap: 8px; }
+    /* Session chips */
     .session-chip {
-      background: #e0e7ff;
-      color: #3730a3;
-      border-radius: 4px;
-      padding: 4px 10px;
-      font-size: .78rem;
-      font-family: monospace;
-      cursor: pointer;
-      transition: background .15s;
+      display: inline-block;
+      background: #e0e7ff; color: #3730a3;
+      border-radius: 4px; padding: 4px 10px;
+      font-size: .78rem; font-family: monospace;
+      cursor: pointer; transition: background .15s;
     }
     .session-chip:hover { background: #c7d2fe; }
 
-    /* Subscriber detail */
-    .sub-detail { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-    .sub-field { background: #f4f6f9; border-radius: 6px; padding: 10px 14px; }
-    .sub-field .flabel { font-size: .72rem; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
-    .sub-field .fvalue { font-size: .9rem; font-weight: 600; color: #1a2842; word-break: break-all; }
+    /* Two-column layout */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
 
-    /* Error / empty */
-    .empty { color: #9ca3af; font-size: .85rem; padding: 12px 0; }
-    .err   { color: #dc2626; font-size: .85rem; padding: 8px; background: #fee2e2; border-radius: 4px; }
-
-    /* Section layout for two columns on wide screens */
-    @media (min-width: 900px) {
-      .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    /* Sub detail cards */
+    .sub-detail { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .75rem; }
+    .sub-field {
+      background: var(--pico-card-sectioning-background-color);
+      border-radius: var(--pico-border-radius); padding: .6rem .9rem;
     }
+    .sub-field .flabel {
+      font-size: .7rem; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--pico-muted-color); margin-bottom: .25rem;
+    }
+    .sub-field .fvalue { font-size: .88rem; font-weight: 600; word-break: break-all; }
+
+    /* Utility */
+    .muted { color: var(--pico-muted-color); font-size: .85rem; }
+    .htmx-indicator { display: none; }
+    .htmx-request .htmx-indicator { display: inline; }
+    details > summary { cursor: pointer; font-weight: 600; }
   </style>
 </head>
 <body>
 
-<header>
+<nav class="top-bar">
   <h1>Next-CHF Management Console</h1>
-  <span class="badge">Live</span>
-  <span class="refresh-info" id="last-refresh">Refreshing&hellip;</span>
-</header>
+  <span class="live-badge">Live</span>
+  <span class="ts" id="last-refresh"></span>
+</nav>
 
-<main>
+<main class="container-fluid" style="padding: 1.5rem;">
 
-  <!-- System Status -->
-  <div class="card">
-    <div class="card-header">
-      <span class="dot"></span>
-      <h2>System Status</h2>
+  <!-- ============================================================ -->
+  <!-- System Status                                                 -->
+  <!-- ============================================================ -->
+  <article>
+    <header>System Status</header>
+    <div id="dashboard-content"
+         hx-get="/api/dashboard"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML">
+      <p class="muted" aria-busy="true">Loading dashboard&hellip;</p>
     </div>
-    <div class="card-body">
-      <div class="kpi-grid" id="dashboard-kpis">
-        <div class="kpi"><div class="label">Node</div><div class="value" id="kpi-node" style="font-size:1rem;">—</div></div>
-        <div class="kpi"><div class="label">Uptime</div><div class="value" id="kpi-uptime">—</div><span class="unit"></span></div>
-        <div class="kpi"><div class="label">Processes</div><div class="value" id="kpi-procs">—</div></div>
-        <div class="kpi"><div class="label">Active Sessions</div><div class="value" id="kpi-sessions">—</div></div>
-        <div class="kpi"><div class="label">DIAMETER Peers</div><div class="value" id="kpi-peers">—</div></div>
-        <div class="kpi"><div class="label">Memory (Total)</div><div class="value" id="kpi-mem">—</div><span class="unit">MB</span></div>
-      </div>
-      <div class="mem-bar-wrap">
-        <div class="mem-bar-label">
-          <span>Memory breakdown</span>
-          <span id="mem-legend">—</span>
-        </div>
-        <div class="mem-bar"><div class="mem-bar-fill" id="mem-bar-fill" style="width:0%"></div></div>
-      </div>
-    </div>
-  </div>
+  </article>
 
-  <div class="two-col">
+  <div class="grid-2">
 
     <!-- Active Sessions -->
-    <div class="card">
-      <div class="card-header">
-        <h2>Active Sessions</h2>
+    <article>
+      <header>Active Sessions</header>
+      <div id="sessions-content"
+           hx-get="/api/sessions"
+           hx-trigger="load, every 5s"
+           hx-swap="innerHTML">
+        <p class="muted" aria-busy="true">Loading&hellip;</p>
       </div>
-      <div class="card-body">
-        <div id="session-count" class="empty">Loading&hellip;</div>
-        <div id="session-chips" class="session-list" style="margin-top:12px;"></div>
-      </div>
-    </div>
+    </article>
 
     <!-- DIAMETER Status -->
-    <div class="card">
-      <div class="card-header">
-        <h2>DIAMETER Status</h2>
+    <article>
+      <header>DIAMETER Status</header>
+      <div id="diameter-content">
+        <!-- filled by dashboard template -->
+        <p class="muted">Waiting for data&hellip;</p>
       </div>
-      <div class="card-body">
-        <div id="diameter-info" class="empty">Loading&hellip;</div>
-      </div>
-    </div>
+    </article>
 
   </div>
 
-  <!-- CDR Browser -->
-  <div class="card">
-    <div class="card-header">
-      <h2>CDR Browser</h2>
-    </div>
-    <div class="card-body">
-      <div class="filter-row">
-        <input type="text" id="cdr-imsi" placeholder="Filter by IMSI" style="width:220px;" />
-        <select id="cdr-type">
+  <!-- ============================================================ -->
+  <!-- CDR Browser                                                   -->
+  <!-- ============================================================ -->
+  <article>
+    <header>CDR Browser</header>
+    <form id="cdr-form" onsubmit="return loadCdrs(event)">
+      <fieldset role="group">
+        <input type="text" name="imsi" placeholder="Filter by IMSI" />
+        <select name="type">
           <option value="">All types</option>
           <option value="online">online</option>
           <option value="offline">offline</option>
           <option value="converged">converged</option>
         </select>
-        <input type="number" id="cdr-limit" placeholder="Limit" value="50" style="width:90px;" />
-        <button onclick="loadCdrs()">Fetch CDRs</button>
-      </div>
-      <div id="cdr-table-wrap">
-        <div class="empty">Use the filter above to load CDRs.</div>
-      </div>
+        <input type="number" name="limit" placeholder="Limit" value="50" style="max-width:100px;" />
+        <button type="submit">Fetch CDRs</button>
+      </fieldset>
+    </form>
+    <div id="cdr-results">
+      <p class="muted">Use the filter above to load CDRs.</p>
     </div>
-  </div>
+  </article>
 
-  <!-- Subscriber Management -->
-  <div class="card">
-    <div class="card-header">
-      <h2>Subscriber Management</h2>
-    </div>
-    <div class="card-body">
+  <!-- ============================================================ -->
+  <!-- Subscriber Management                                         -->
+  <!-- ============================================================ -->
+  <article>
+    <header>Subscriber Management</header>
 
-      <!-- Lookup -->
-      <div class="filter-row" style="margin-bottom:20px;">
-        <input type="text" id="sub-imsi" placeholder="IMSI" style="width:220px;" />
-        <button onclick="lookupSubscriber()">Look Up</button>
-      </div>
-      <div id="sub-detail"></div>
+    <!-- Lookup -->
+    <form id="sub-lookup-form" onsubmit="return lookupSubscriber(event)">
+      <fieldset role="group">
+        <input type="text" name="imsi" placeholder="IMSI" required />
+        <button type="submit">Look Up</button>
+      </fieldset>
+    </form>
+    <div id="sub-detail"></div>
 
-      <!-- Create -->
-      <details style="margin-top:24px;">
-        <summary style="cursor:pointer;font-weight:600;font-size:.9rem;color:#1a2842;margin-bottom:12px;">
-          Create New Subscriber
-        </summary>
-        <div style="margin-top:12px;">
-          <div class="filter-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
-            <input type="text" id="new-imsi"       placeholder="IMSI *"       style="width:280px;" />
-            <input type="text" id="new-msisdn"     placeholder="MSISDN *"     style="width:280px;" />
-            <input type="text" id="new-account-id" placeholder="Account ID *" style="width:280px;" />
-            <button onclick="createSubscriber()">Create</button>
-          </div>
-          <div id="create-result"></div>
+    <!-- Create -->
+    <details style="margin-top: 1.5rem;">
+      <summary>Create New Subscriber</summary>
+      <form id="sub-create-form" onsubmit="return createSubscriber(event)" style="margin-top: 1rem;">
+        <div class="grid">
+          <input type="text" name="imsi" placeholder="IMSI *" required />
+          <input type="text" name="msisdn" placeholder="MSISDN *" required />
+          <input type="text" name="account_id" placeholder="Account ID *" required />
         </div>
-      </details>
-    </div>
-  </div>
+        <button type="submit" style="width: auto;">Create</button>
+      </form>
+      <div id="create-result"></div>
+    </details>
+  </article>
 
 </main>
 
+<script src="/static/vendor/htmx.min.js"></script>
 <script>
-// ----------------------------------------------------------------
-// Utilities
-// ----------------------------------------------------------------
+// ================================================================
+// Tiny client-side template helpers
+// ================================================================
 function fmtBytes(b) {
   if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
   if (b >= 1048576)    return (b / 1048576).toFixed(1) + ' MB';
   if (b >= 1024)       return (b / 1024).toFixed(1) + ' KB';
   return b + ' B';
 }
-
 function fmtUptime(s) {
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
         m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -283,221 +210,217 @@ function fmtUptime(s) {
   if (h > 0) return h + 'h ' + m + 'm ' + sec + 's';
   return m + 'm ' + sec + 's';
 }
-
 function typeTag(t) {
-  const cls = { online: 'tag-online', offline: 'tag-offline', converged: 'tag-converged' };
-  return `<span class="tag ${cls[t] || ''}">${t}</span>`;
+  const cls = {online:'tag-online', offline:'tag-offline', converged:'tag-converged'};
+  return '<span class="tag ' + (cls[t]||'') + '">' + t + '</span>';
 }
-
+function statusTag(s) {
+  const cls = {active:'tag-active', suspended:'tag-offline', terminated:'tag-offline'};
+  return '<span class="tag ' + (cls[s]||'') + '">' + s + '</span>';
+}
 function el(id) { return document.getElementById(id); }
 
-function setErr(id, msg) {
-  el(id).innerHTML = `<div class="err">${msg}</div>`;
-}
+// ================================================================
+// HTMX beforeSwap: intercept JSON responses and render templates
+// ================================================================
+document.body.addEventListener('htmx:beforeSwap', function(evt) {
+  const xhr = evt.detail.xhr;
+  const ct = xhr.getResponseHeader('content-type') || '';
+  if (!ct.includes('application/json')) return;
 
-// ----------------------------------------------------------------
-// Dashboard (auto-refresh)
-// ----------------------------------------------------------------
-async function loadDashboard() {
-  try {
-    const r = await fetch('/api/dashboard');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
+  const targetId = evt.detail.target.id;
+  let data;
+  try { data = JSON.parse(xhr.responseText); } catch(e) { return; }
 
-    el('kpi-node').textContent    = d.node || '—';
-    el('kpi-uptime').textContent  = fmtUptime(d.uptime || 0);
-    el('kpi-procs').textContent   = `${d.processes.count} / ${d.processes.limit}`;
-    el('kpi-sessions').textContent = d.sessions.active;
-    el('kpi-peers').textContent   = d.diameter.peers;
-
-    const totalMb = (d.memory.total / 1048576).toFixed(1);
-    el('kpi-mem').textContent = totalMb;
-
-    // memory bar: processes fraction of total
-    const pct = d.memory.total > 0
-      ? Math.round(d.memory.processes / d.memory.total * 100)
-      : 0;
-    el('mem-bar-fill').style.width = pct + '%';
-    el('mem-legend').textContent =
-      `processes ${fmtBytes(d.memory.processes)}  ·  ` +
-      `ets ${fmtBytes(d.memory.ets)}  ·  ` +
-      `binary ${fmtBytes(d.memory.binary)}`;
-
-    // DIAMETER
-    const svcs = (d.diameter.services || []).join(', ') || '(none)';
-    el('diameter-info').innerHTML =
-      `<div class="kpi-grid">` +
-        `<div class="kpi"><div class="label">Services</div><div class="value" style="font-size:.9rem;">${svcs}</div></div>` +
-        `<div class="kpi"><div class="label">Peers</div><div class="value">${d.diameter.peers}</div></div>` +
-      `</div>`;
-
-    el('last-refresh').textContent = 'Last refresh: ' + new Date().toLocaleTimeString();
-  } catch (e) {
-    el('last-refresh').textContent = 'Refresh failed: ' + e.message;
+  if (targetId === 'dashboard-content') {
+    evt.detail.serverResponse = renderDashboard(data);
+  } else if (targetId === 'sessions-content') {
+    evt.detail.serverResponse = renderSessions(data);
   }
+});
+
+// ================================================================
+// Dashboard template
+// ================================================================
+function renderDashboard(d) {
+  const totalMb = (d.memory.total / 1048576).toFixed(1);
+  const procPct = d.memory.total > 0
+    ? Math.round(d.memory.processes / d.memory.total * 100) : 0;
+
+  // Update timestamp in nav
+  el('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+  // Update diameter card (separate target, not part of this swap)
+  const svcs = (d.diameter.services || []).join(', ') || '(none)';
+  el('diameter-content').innerHTML =
+    '<div class="kpi-grid">' +
+      '<div class="kpi-card"><div class="label">Services</div><div class="value" style="font-size:.9rem">' + svcs + '</div></div>' +
+      '<div class="kpi-card"><div class="label">Peers</div><div class="value">' + d.diameter.peers + '</div></div>' +
+    '</div>';
+
+  return '' +
+    '<div class="kpi-grid">' +
+      '<div class="kpi-card"><div class="label">Node</div><div class="value" style="font-size:.9rem">' + (d.node||'?') + '</div></div>' +
+      '<div class="kpi-card"><div class="label">Uptime</div><div class="value">' + fmtUptime(d.uptime||0) + '</div></div>' +
+      '<div class="kpi-card"><div class="label">Processes</div><div class="value">' + d.processes.count + '<span class="unit"> / ' + d.processes.limit + '</span></div></div>' +
+      '<div class="kpi-card"><div class="label">Active Sessions</div><div class="value">' + d.sessions.active + '</div></div>' +
+      '<div class="kpi-card"><div class="label">DIAMETER Peers</div><div class="value">' + d.diameter.peers + '</div></div>' +
+      '<div class="kpi-card"><div class="label">Memory</div><div class="value">' + totalMb + '<span class="unit"> MB</span></div></div>' +
+    '</div>' +
+    '<div class="mem-bar"><div class="mem-bar-fill" style="width:' + procPct + '%"></div></div>' +
+    '<div class="mem-legend">processes ' + fmtBytes(d.memory.processes) +
+      ' &middot; ets ' + fmtBytes(d.memory.ets) +
+      ' &middot; binary ' + fmtBytes(d.memory.binary) + '</div>';
 }
 
-// ----------------------------------------------------------------
-// Sessions
-// ----------------------------------------------------------------
-async function loadSessions() {
-  try {
-    const r = await fetch('/api/sessions');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
-    const ids = d.session_ids || [];
-    el('session-count').textContent = `${ids.length} active session(s)`;
-    el('session-chips').innerHTML = ids.length === 0
-      ? '<span class="empty">No active sessions</span>'
-      : ids.map(id =>
-          `<span class="session-chip" title="Click to view details"
-            onclick="viewSession('${id}')">${id}</span>`
-        ).join('');
-  } catch (e) {
-    el('session-count').textContent = '';
-    el('session-chips').innerHTML = `<div class="err">Failed to load sessions: ${e.message}</div>`;
-  }
+// ================================================================
+// Sessions template
+// ================================================================
+function renderSessions(d) {
+  const ids = d.session_ids || [];
+  const count = '<p style="margin-bottom:.75rem"><strong>' + ids.length + '</strong> active session(s)</p>';
+  if (ids.length === 0) return count + '<p class="muted">No active sessions</p>';
+  const chips = ids.map(function(id) {
+    return '<span class="session-chip" onclick="viewSession(\'' + id + '\')">' + id + '</span>';
+  }).join(' ');
+  return count + '<div>' + chips + '</div>';
 }
 
-async function viewSession(id) {
-  try {
-    const r = await fetch('/api/sessions/' + encodeURIComponent(id));
-    if (!r.ok) { alert('Session not found'); return; }
-    const d = await r.json();
-    alert(JSON.stringify(d, null, 2));
-  } catch (e) {
-    alert('Error: ' + e.message);
-  }
+// ================================================================
+// Session detail (click on chip)
+// ================================================================
+function viewSession(id) {
+  fetch('/api/sessions/' + encodeURIComponent(id))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var msg = 'Session: ' + d.session_id + '\n' +
+                'IMSI: ' + d.imsi + '\n' +
+                'Type: ' + d.type + '\n' +
+                'State: ' + d.state + '\n' +
+                'Granted: ' + JSON.stringify(d.granted_units) + '\n' +
+                'Used: ' + JSON.stringify(d.used_units);
+      alert(msg);
+    })
+    .catch(function(e) { alert('Error: ' + e.message); });
 }
 
-// ----------------------------------------------------------------
-// CDRs
-// ----------------------------------------------------------------
-async function loadCdrs() {
-  const wrap  = el('cdr-table-wrap');
-  wrap.innerHTML = '<div class="empty">Loading&hellip;</div>';
-  const params = new URLSearchParams();
-  const imsi  = el('cdr-imsi').value.trim();
-  const type  = el('cdr-type').value;
-  const limit = el('cdr-limit').value.trim();
+// ================================================================
+// CDR browser (form submit)
+// ================================================================
+function loadCdrs(evt) {
+  evt.preventDefault();
+  var form = el('cdr-form');
+  var params = new URLSearchParams();
+  var imsi  = form.imsi.value.trim();
+  var type  = form.type.value;
+  var limit = form.limit.value.trim();
   if (imsi)  params.set('imsi', imsi);
   if (type)  params.set('type', type);
   if (limit) params.set('limit', limit);
+  var wrap = el('cdr-results');
+  wrap.innerHTML = '<p class="muted" aria-busy="true">Loading&hellip;</p>';
 
-  try {
-    const r = await fetch('/api/cdrs?' + params.toString());
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const cdrs = await r.json();
-    if (!cdrs.length) {
-      wrap.innerHTML = '<div class="empty">No CDRs match the filter.</div>';
-      return;
-    }
-    const rows = cdrs.map(c => `
-      <tr>
-        <td><code>${c.id}</code></td>
-        <td>${c.imsi}</td>
-        <td>${typeTag(c.type)}</td>
-        <td>${c.rating_group}</td>
-        <td>${c.used_units ? JSON.stringify(c.used_units) : '—'}</td>
-        <td>${c.timestamp ? new Date(c.timestamp).toLocaleString() : '—'}</td>
-      </tr>`).join('');
-    wrap.innerHTML = `
-      <table>
-        <thead><tr>
-          <th>CDR ID</th><th>IMSI</th><th>Type</th>
-          <th>RG</th><th>Used Units</th><th>Timestamp</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
-  } catch (e) {
-    setErr('cdr-table-wrap', 'Failed to load CDRs: ' + e.message);
-  }
-}
-
-// ----------------------------------------------------------------
-// Subscribers
-// ----------------------------------------------------------------
-async function lookupSubscriber() {
-  const imsi = el('sub-imsi').value.trim();
-  const wrap = el('sub-detail');
-  if (!imsi) { wrap.innerHTML = '<div class="err">Please enter an IMSI.</div>'; return; }
-  wrap.innerHTML = '<div class="empty">Looking up&hellip;</div>';
-
-  try {
-    const r = await fetch('/api/subscribers/' + encodeURIComponent(imsi));
-    if (r.status === 404) { wrap.innerHTML = '<div class="err">Subscriber not found.</div>'; return; }
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const s = await r.json();
-
-    const bal = s.balance
-      ? `<div class="sub-field">
-           <div class="flabel">Balance (available)</div>
-           <div class="fvalue">${(s.balance.available / 1e6).toFixed(2)} units</div>
-         </div>
-         <div class="sub-field">
-           <div class="flabel">Reserved</div>
-           <div class="fvalue">${(s.balance.reserved / 1e6).toFixed(2)} units</div>
-         </div>`
-      : `<div class="sub-field"><div class="flabel">Balance</div><div class="fvalue">N/A</div></div>`;
-
-    wrap.innerHTML = `
-      <div class="sub-detail">
-        <div class="sub-field"><div class="flabel">IMSI</div><div class="fvalue">${s.imsi}</div></div>
-        <div class="sub-field"><div class="flabel">MSISDN</div><div class="fvalue">${s.msisdn}</div></div>
-        <div class="sub-field"><div class="flabel">Account ID</div><div class="fvalue">${s.account_id}</div></div>
-        <div class="sub-field">
-          <div class="flabel">Status</div>
-          <div class="fvalue"><span class="tag tag-active">${s.status}</span></div>
-        </div>
-        ${bal}
-        <div class="sub-field"><div class="flabel">Created</div><div class="fvalue">${new Date(s.created_at).toLocaleString()}</div></div>
-        <div class="sub-field"><div class="flabel">Updated</div><div class="fvalue">${new Date(s.updated_at).toLocaleString()}</div></div>
-      </div>`;
-  } catch (e) {
-    wrap.innerHTML = `<div class="err">Error: ${e.message}</div>`;
-  }
-}
-
-async function createSubscriber() {
-  const body = {
-    imsi:       el('new-imsi').value.trim(),
-    msisdn:     el('new-msisdn').value.trim(),
-    account_id: el('new-account-id').value.trim()
-  };
-  const wrap = el('create-result');
-  if (!body.imsi || !body.msisdn || !body.account_id) {
-    wrap.innerHTML = '<div class="err">All fields are required.</div>';
-    return;
-  }
-  try {
-    const r = await fetch('/api/subscribers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+  fetch('/api/cdrs?' + params.toString())
+    .then(function(r) { return r.json(); })
+    .then(function(cdrs) {
+      if (!cdrs.length) {
+        wrap.innerHTML = '<p class="muted">No CDRs match the filter.</p>';
+        return;
+      }
+      var rows = cdrs.map(function(c) {
+        return '<tr>' +
+          '<td><code>' + c.id + '</code></td>' +
+          '<td>' + c.imsi + '</td>' +
+          '<td>' + typeTag(c.type) + '</td>' +
+          '<td>' + c.rating_group + '</td>' +
+          '<td>' + (c.used_units ? JSON.stringify(c.used_units) : '—') + '</td>' +
+          '<td>' + (c.timestamp ? new Date(c.timestamp).toLocaleString() : '—') + '</td>' +
+        '</tr>';
+      }).join('');
+      wrap.innerHTML =
+        '<figure><table role="grid">' +
+          '<thead><tr><th>CDR ID</th><th>IMSI</th><th>Type</th><th>RG</th><th>Used Units</th><th>Timestamp</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+        '</table></figure>';
+    })
+    .catch(function(e) {
+      wrap.innerHTML = '<p class="muted" style="color:var(--pico-del-color)">Failed: ' + e.message + '</p>';
     });
-    const d = await r.json();
-    if (r.ok) {
-      wrap.innerHTML = `<div style="color:#065f46;background:#d1fae5;padding:8px;border-radius:4px;">
-        Subscriber ${d.imsi} created successfully.</div>`;
-      el('new-imsi').value = el('new-msisdn').value = el('new-account-id').value = '';
+  return false;
+}
+
+// ================================================================
+// Subscriber lookup (form submit)
+// ================================================================
+function lookupSubscriber(evt) {
+  evt.preventDefault();
+  var imsi = el('sub-lookup-form').imsi.value.trim();
+  var wrap = el('sub-detail');
+  if (!imsi) { wrap.innerHTML = '<p class="muted" style="color:var(--pico-del-color)">Enter an IMSI.</p>'; return false; }
+  wrap.innerHTML = '<p class="muted" aria-busy="true">Looking up&hellip;</p>';
+
+  fetch('/api/subscribers/' + encodeURIComponent(imsi))
+    .then(function(r) {
+      if (r.status === 404) { wrap.innerHTML = '<p class="muted" style="color:var(--pico-del-color)">Subscriber not found.</p>'; throw null; }
+      return r.json();
+    })
+    .then(function(s) {
+      if (!s) return;
+      var bal = '';
+      if (s.balance) {
+        bal =
+          '<div class="sub-field"><div class="flabel">Balance (available)</div><div class="fvalue">' + (s.balance.available / 1e6).toFixed(2) + ' units</div></div>' +
+          '<div class="sub-field"><div class="flabel">Reserved</div><div class="fvalue">' + (s.balance.reserved / 1e6).toFixed(2) + ' units</div></div>';
+      }
+      wrap.innerHTML =
+        '<div class="sub-detail">' +
+          '<div class="sub-field"><div class="flabel">IMSI</div><div class="fvalue">' + s.imsi + '</div></div>' +
+          '<div class="sub-field"><div class="flabel">MSISDN</div><div class="fvalue">' + s.msisdn + '</div></div>' +
+          '<div class="sub-field"><div class="flabel">Account ID</div><div class="fvalue">' + s.account_id + '</div></div>' +
+          '<div class="sub-field"><div class="flabel">Status</div><div class="fvalue">' + statusTag(s.status) + '</div></div>' +
+          bal +
+          '<div class="sub-field"><div class="flabel">Created</div><div class="fvalue">' + new Date(s.created_at).toLocaleString() + '</div></div>' +
+          '<div class="sub-field"><div class="flabel">Updated</div><div class="fvalue">' + new Date(s.updated_at).toLocaleString() + '</div></div>' +
+        '</div>';
+    })
+    .catch(function(e) {
+      if (e) wrap.innerHTML = '<p class="muted" style="color:var(--pico-del-color)">Error: ' + e.message + '</p>';
+    });
+  return false;
+}
+
+// ================================================================
+// Subscriber create (form submit)
+// ================================================================
+function createSubscriber(evt) {
+  evt.preventDefault();
+  var form = el('sub-create-form');
+  var body = {
+    imsi:       form.imsi.value.trim(),
+    msisdn:     form.msisdn.value.trim(),
+    account_id: form.account_id.value.trim()
+  };
+  var wrap = el('create-result');
+
+  fetch('/api/subscribers', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  })
+  .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+  .then(function(res) {
+    if (res.ok) {
+      wrap.innerHTML = '<p style="color:var(--pico-ins-color)">Subscriber ' + (res.data.imsi || body.imsi) + ' created.</p>';
+      form.reset();
     } else {
-      wrap.innerHTML = `<div class="err">Error: ${d.error || JSON.stringify(d)}</div>`;
+      wrap.innerHTML = '<p style="color:var(--pico-del-color)">Error: ' + (res.data.error || JSON.stringify(res.data)) + '</p>';
     }
-  } catch (e) {
-    wrap.innerHTML = `<div class="err">Request failed: ${e.message}</div>`;
-  }
+  })
+  .catch(function(e) {
+    wrap.innerHTML = '<p style="color:var(--pico-del-color)">Request failed: ' + e.message + '</p>';
+  });
+  return false;
 }
-
-// ----------------------------------------------------------------
-// Init + auto-refresh
-// ----------------------------------------------------------------
-function refreshAll() {
-  loadDashboard();
-  loadSessions();
-}
-
-refreshAll();
-setInterval(refreshAll, 5000);
 </script>
 </body>
 </html>
