@@ -28,13 +28,15 @@
 
 -spec init(Opts :: map()) -> ok | {error, term()}.
 init(_Opts) ->
-    %% Ensure mnesia schema exists on this node.
+    %% Mnesia schema must be created before mnesia:start().
+    %% Stop mnesia if it happens to be running, create schema, then start.
+    _ = application:stop(mnesia),
     case mnesia:create_schema([node()]) of
         ok               -> ok;
         {error, {_, {already_exists, _}}} -> ok;
         {error, SchemaErr} -> error({schema, SchemaErr})
     end,
-    ok = mnesia:start(),
+    ok = application:ensure_started(mnesia),
     ok = ensure_table(subscriber, record_info(fields, subscriber), disc_copies,
                       [{index, [#subscriber.msisdn]}]),
     ok = ensure_table(balance,    record_info(fields, balance),    disc_copies, []),

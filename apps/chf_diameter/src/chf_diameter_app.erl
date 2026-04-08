@@ -6,12 +6,9 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    %% The OTP diameter application must be running before we start our service.
-    ok = diameter:start(),
+    %% diameter is listed as a dependency in .app.src so it's already started.
     chf_diameter_sup:start_link().
 
 stop(_State) ->
-    %% Tear down our service and then the diameter stack.
     _ = diameter:stop_service('next-chf'),
-    _ = diameter:stop(),
     ok.
