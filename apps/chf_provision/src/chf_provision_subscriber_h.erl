@@ -1,127 +1,125 @@
-%% chf_provision_subscriber_h.erl — Cowboy HTTP handler for subscriber resources.
+%% chf_provision_subscriber_h.erl — Cowboy REST handler for subscriber resources.
 %%
 %% Routes:
-%%   GET    /api/v1/subscribers/:imsi        — fetch subscriber
-%%   POST   /api/v1/subscribers              — create subscriber
-%%   PUT    /api/v1/subscribers/:imsi        — update subscriber
-%%   DELETE /api/v1/subscribers/:imsi        — delete subscriber
+%%   GET    /api/v1/subscribers/:imsi  — fetch subscriber
+%%   POST   /api/v1/subscribers        — create subscriber
+%%   PUT    /api/v1/subscribers/:imsi  — update subscriber
+%%   DELETE /api/v1/subscribers/:imsi  — delete subscriber
 -module(chf_provision_subscriber_h).
--behaviour(cowboy_handler).
 
 -include_lib("chf_db/include/chf_db.hrl").
 
--export([init/2]).
+-export([init/2,
+         allowed_methods/2,
+         content_types_provided/2,
+         content_types_accepted/2,
+         resource_exists/2,
+         delete_resource/2,
+         to_json/2,
+         from_json/2]).
+
+-record(state, {
+    imsi       :: binary() | undefined,
+    subscriber :: #subscriber{} | undefined
+}).
 
 %%====================================================================
-%% Cowboy callback
+%% REST callbacks
 %%====================================================================
 
-init(Req, State) ->
-    Method = cowboy_req:method(Req),
-    handle(Method, Req, State).
+init(Req, _Opts) ->
+    Imsi = cowboy_req:binding(imsi, Req, undefined),
+    {cowboy_rest, Req, #state{imsi = Imsi}}.
 
-%%====================================================================
-%% Method dispatch
-%%====================================================================
+allowed_methods(Req, #state{imsi = undefined} = State) ->
+    {[<<"GET">>, <<"POST">>], Req, State};
+allowed_methods(Req, State) ->
+    {[<<"GET">>, <<"PUT">>, <<"DELETE">>], Req, State}.
 
-handle(<<"GET">>, Req, State) ->
-    Imsi = cowboy_req:binding(imsi, Req),
+content_types_provided(Req, State) ->
+    {[{<<"application/json">>, to_json}], Req, State}.
+
+content_types_accepted(Req, State) ->
+    {[{<<"application/json">>, from_json}], Req, State}.
+
+resource_exists(Req, #state{imsi = undefined} = State) ->
+    %% Collection endpoint — POST creates, GET not meaningful without ID.
+    %% Return true so POST goes through content_types_accepted.
+    {true, Req, State};
+resource_exists(Req, #state{imsi = Imsi} = State) ->
     case chf_db:subscriber_lookup(Imsi) of
         {ok, Sub} ->
-            Body = chf_provision_json:encode_subscriber(Sub),
-            Req2 = reply(200, Body, Req),
-            {ok, Req2, State};
+            {true, Req, State#state{subscriber = Sub}};
         {error, not_found} ->
-            Req2 = reply_error(404, <<"subscriber not found">>, Req),
-            {ok, Req2, State}
-    end;
+            {false, Req, State}
+    end.
 
-handle(<<"POST">>, Req, State) ->
-    case read_json_body(Req) of
-        {error, Reason, Req2} ->
-            Req3 = reply_error(400, Reason, Req2),
-            {ok, Req3, State};
-        {ok, Body, Req2} ->
-            create_subscriber(Body, Req2, State)
-    end;
+%%====================================================================
+%% GET — provide JSON representation
+%%====================================================================
 
-handle(<<"PUT">>, Req, State) ->
-    Imsi = cowboy_req:binding(imsi, Req),
-    case chf_db:subscriber_lookup(Imsi) of
-        {error, not_found} ->
-            Req2 = reply_error(404, <<"subscriber not found">>, Req),
-            {ok, Req2, State};
-        {ok, Existing} ->
-            case read_json_body(Req) of
-                {error, Reason, Req2} ->
-                    Req3 = reply_error(400, Reason, Req2),
-                    {ok, Req3, State};
-                {ok, Fields, Req2} ->
-                    update_subscriber(Existing, Fields, Req2, State)
+to_json(Req, #state{subscriber = Sub} = State) when Sub =/= undefined ->
+    Body = chf_provision_json:encode_subscriber(Sub),
+    {Body, Req, State};
+to_json(Req, State) ->
+    Body = chf_provision_json:encode(#{<<"error">> => <<"not found">>}),
+    {Body, Req, State}.
+
+%%====================================================================
+%% POST / PUT — accept JSON
+%%====================================================================
+
+from_json(Req, State) ->
+    Method = cowboy_req:method(Req),
+    {ok, RawBody, Req2} = cowboy_req:read_body(Req),
+    case decode_body(RawBody) of
+        {error, Reason} ->
+            reply_error(400, Reason, Req2, State);
+        {ok, Fields} ->
+            case Method of
+                <<"POST">> -> handle_create(Fields, Req2, State);
+                <<"PUT">>  -> handle_update(Fields, Req2, State)
             end
-    end;
+    end.
 
-handle(<<"DELETE">>, Req, State) ->
-    Imsi = cowboy_req:binding(imsi, Req),
+%%====================================================================
+%% DELETE
+%%====================================================================
+
+delete_resource(Req, #state{imsi = Imsi} = State) ->
     case chf_db:subscriber_delete(Imsi) of
-        ok ->
-            Req2 = cowboy_req:reply(204, #{}, <<>>, Req),
-            {ok, Req2, State};
-        {error, not_found} ->
-            Req2 = reply_error(404, <<"subscriber not found">>, Req),
-            {ok, Req2, State};
-        {error, Err} ->
-            Req2 = reply_error(500, format_error(Err), Req),
-            {ok, Req2, State}
-    end;
-
-handle(_Method, Req, State) ->
-    Req2 = reply_error(405, <<"method not allowed">>, Req),
-    {ok, Req2, State}.
+        ok              -> {true, Req, State};
+        {error, _}      -> {false, Req, State}
+    end.
 
 %%====================================================================
 %% Create logic
 %%====================================================================
 
-create_subscriber(Fields, Req, State) ->
-    case maps:find(imsi, Fields) of
-        error ->
-            Req2 = reply_error(400, <<"missing required field: imsi">>, Req),
-            {ok, Req2, State};
-        {ok, Imsi} ->
-            case maps:find(msisdn, Fields) of
-                error ->
-                    Req2 = reply_error(400, <<"missing required field: msisdn">>, Req),
-                    {ok, Req2, State};
-                {ok, Msisdn} ->
-                    case maps:find(account_id, Fields) of
-                        error ->
-                            Req2 = reply_error(400, <<"missing required field: account_id">>, Req),
-                            {ok, Req2, State};
-                        {ok, AccountId} ->
-                            RatingGroups = parse_rating_groups(maps:get(rating_groups, Fields, #{})),
-                            Now = erlang:system_time(millisecond),
-                            Sub = #subscriber{
-                                imsi          = Imsi,
-                                msisdn        = Msisdn,
-                                account_id    = AccountId,
-                                status        = active,
-                                rating_groups = RatingGroups,
-                                created_at    = Now,
-                                updated_at    = Now
-                            },
-                            case chf_db:subscriber_create(Sub) of
-                                ok ->
-                                    %% Create initial balance record with 0 amount.
-                                    _ = chf_db:balance_topup(AccountId, 0),
-                                    Body = chf_provision_json:encode_subscriber(Sub),
-                                    Req2 = reply(201, Body, Req),
-                                    {ok, Req2, State};
-                                {error, Err} ->
-                                    Req2 = reply_error(500, format_error(Err), Req),
-                                    {ok, Req2, State}
-                            end
-                    end
+handle_create(Fields, Req, State) ->
+    case validate_create_fields(Fields) of
+        {error, Reason} ->
+            reply_error(400, Reason, Req, State);
+        {ok, Imsi, Msisdn, AccountId} ->
+            RatingGroups = parse_rating_groups(maps:get(rating_groups, Fields, #{})),
+            Now = erlang:system_time(millisecond),
+            Sub = #subscriber{
+                imsi          = Imsi,
+                msisdn        = Msisdn,
+                account_id    = AccountId,
+                status        = active,
+                rating_groups = RatingGroups,
+                created_at    = Now,
+                updated_at    = Now
+            },
+            case chf_db:subscriber_create(Sub) of
+                ok ->
+                    _ = chf_db:balance_topup(AccountId, 0),
+                    Body = chf_provision_json:encode_subscriber(Sub),
+                    Req2 = cowboy_req:set_resp_body(Body, Req),
+                    {{created, <<"/api/v1/subscribers/", Imsi/binary>>}, Req2, State};
+                {error, Err} ->
+                    reply_error(500, format_error(Err), Req, State)
             end
     end.
 
@@ -129,10 +127,10 @@ create_subscriber(Fields, Req, State) ->
 %% Update logic
 %%====================================================================
 
-update_subscriber(Existing, Fields, Req, State) ->
+handle_update(Fields, Req, #state{subscriber = Existing} = State) ->
     Now = erlang:system_time(millisecond),
     Updated = Existing#subscriber{
-        msisdn        = maps:get(msisdn,        Fields, Existing#subscriber.msisdn),
+        msisdn        = maps:get(msisdn, Fields, Existing#subscriber.msisdn),
         status        = parse_status(maps:get(status, Fields, Existing#subscriber.status)),
         rating_groups = case maps:find(rating_groups, Fields) of
                             {ok, RG} -> parse_rating_groups(RG);
@@ -143,36 +141,38 @@ update_subscriber(Existing, Fields, Req, State) ->
     case chf_db:subscriber_update(Updated) of
         ok ->
             Body = chf_provision_json:encode_subscriber(Updated),
-            Req2 = reply(200, Body, Req),
-            {ok, Req2, State};
+            Req2 = cowboy_req:set_resp_body(Body, Req),
+            {true, Req2, State#state{subscriber = Updated}};
         {error, Err} ->
-            Req2 = reply_error(500, format_error(Err), Req),
-            {ok, Req2, State}
+            reply_error(500, format_error(Err), Req, State)
     end.
 
 %%====================================================================
 %% Helpers
 %%====================================================================
 
-%% Read body and decode JSON; return {ok, Map, Req} | {error, Reason, Req}.
-read_json_body(Req) ->
-    case cowboy_req:read_body(Req) of
-        {ok, <<>>, Req2} ->
-            {error, <<"empty request body">>, Req2};
-        {ok, Bin, Req2} ->
-            try
-                {Map, _, _} = chf_provision_json:decode(Bin),
-                {ok, Map, Req2}
-            catch
-                _:_ ->
-                    {error, <<"invalid JSON">>, Req2}
-            end;
-        {error, _} = Err ->
-            {error, format_error(Err), Req}
+validate_create_fields(Fields) ->
+    case {maps:find(imsi, Fields), maps:find(msisdn, Fields), maps:find(account_id, Fields)} of
+        {{ok, Imsi}, {ok, Msisdn}, {ok, AccountId}} ->
+            {ok, Imsi, Msisdn, AccountId};
+        {{ok, _}, {ok, _}, error} ->
+            {error, <<"missing required field: account_id">>};
+        {{ok, _}, error, _} ->
+            {error, <<"missing required field: msisdn">>};
+        {error, _, _} ->
+            {error, <<"missing required field: imsi">>}
     end.
 
-%% Convert rating_groups from JSON form (binary or integer keys) to
-%% #{non_neg_integer() => rating_group_config()}.
+decode_body(<<>>) ->
+    {error, <<"empty request body">>};
+decode_body(Bin) ->
+    try
+        {Map, _, _} = chf_provision_json:decode(Bin),
+        {ok, Map}
+    catch
+        _:_ -> {error, <<"invalid JSON">>}
+    end.
+
 parse_rating_groups(RG) when is_map(RG) ->
     maps:fold(fun(K, V, Acc) ->
         IntKey = to_integer_key(K),
@@ -211,16 +211,11 @@ parse_status(suspended)        -> suspended;
 parse_status(terminated)       -> terminated;
 parse_status(_)                -> active.
 
-reply(Status, Body, Req) ->
-    cowboy_req:reply(Status,
-        #{<<"content-type">> => <<"application/json">>},
-        Body, Req).
-
-reply_error(Status, Msg, Req) when is_binary(Msg) ->
+reply_error(Status, Msg, Req, State) ->
     Body = chf_provision_json:encode(#{<<"error">> => Msg}),
-    reply(Status, Body, Req);
-reply_error(Status, Msg, Req) ->
-    reply_error(Status, iolist_to_binary(io_lib:format("~p", [Msg])), Req).
+    Req2 = cowboy_req:set_resp_header(<<"content-type">>, <<"application/json">>, Req),
+    Req3 = cowboy_req:set_resp_body(Body, Req2),
+    {stop, cowboy_req:reply(Status, Req3), State}.
 
 format_error(Err) when is_binary(Err) -> Err;
 format_error(Err) -> iolist_to_binary(io_lib:format("~p", [Err])).

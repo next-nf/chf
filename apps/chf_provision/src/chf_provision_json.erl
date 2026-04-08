@@ -17,7 +17,7 @@
 -spec ensure_atoms() -> ok.
 ensure_atoms() ->
     _ = [imsi, msisdn, account_id, status, rating_groups, quota, priority,
-         total, reserved, available, amount, error, message, active,
+         total, reserved, available, amount, credit, error, message, active,
          suspended, terminated, created_at, updated_at],
     ok.
 
