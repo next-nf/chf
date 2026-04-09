@@ -1,0 +1,75 @@
+%% chf_session_sweeper.erl — Periodic sweeper for stale charging sessions.
+%%
+%% Scans the charging_session table for active sessions whose
+%% updated_at timestamp exceeds the idle timeout.  Stale sessions
+%% are terminated via chf_core:session_terminate/2 so that proper
+%% balance refunds and CDR finalization occur.
+-module(chf_session_sweeper).
+-behaviour(gen_server).
+
+-include_lib("chf_db/include/chf_db.hrl").
+-include_lib("kernel/include/logger.hrl").
+
+-export([start_link/0]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+
+-define(DEFAULT_IDLE_TIMEOUT, 300000).   %% 5 minutes
+-define(DEFAULT_SWEEP_INTERVAL, 60000).  %% 1 minute
+
+%%====================================================================
+%% API
+%%====================================================================
+
+-spec start_link() -> {ok, pid()} | {error, term()}.
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+%%====================================================================
+%% gen_server callbacks
+%%====================================================================
+
+init([]) ->
+    Interval = application:get_env(chf_core, sweep_interval,
+                                    ?DEFAULT_SWEEP_INTERVAL),
+    IdleTimeout = application:get_env(chf_core, session_idle_timeout,
+                                       ?DEFAULT_IDLE_TIMEOUT),
+    ?LOG_INFO("Session sweeper started: interval=~wms idle_timeout=~wms",
+              [Interval, IdleTimeout]),
+    {ok, #{interval => Interval, idle_timeout => IdleTimeout}, Interval}.
+
+handle_call(_Request, _From, State) ->
+    {reply, ok, State}.
+
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+handle_info(timeout, #{interval := Interval,
+                       idle_timeout := IdleTimeout} = State) ->
+    sweep(IdleTimeout),
+    {noreply, State, Interval};
+
+handle_info(_Info, State) ->
+    {noreply, State}.
+
+%%====================================================================
+%% Internal
+%%====================================================================
+
+sweep(MaxAge) ->
+    Now = erlang:system_time(millisecond),
+    case chf_db:session_list_active() of
+        {ok, Sessions} ->
+            lists:foreach(fun(#charging_session{session_id = SId,
+                                                 updated_at = UpdatedAt}) ->
+                Age = Now - UpdatedAt,
+                if Age > MaxAge ->
+                    ?LOG_INFO("Sweeper: terminating stale session ~s (age=~wms)",
+                              [SId, Age]),
+                    _ = chf_core:session_terminate(SId, #{rating_groups => []});
+                   true ->
+                    ok
+                end
+            end, Sessions);
+        _Error ->
+            ok
+    end.

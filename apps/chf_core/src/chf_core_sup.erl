@@ -15,23 +15,14 @@ init([]) ->
         period    => 10
     },
     Children = [
-        %% Session registry — must start before any session processes.
+        %% Session sweeper — periodically terminates stale sessions.
         #{
-            id       => chf_session_reg,
-            start    => {chf_session_reg, start_link, []},
+            id       => chf_session_sweeper,
+            start    => {chf_session_sweeper, start_link, []},
             restart  => permanent,
             shutdown => 5000,
             type     => worker,
-            modules  => [chf_session_reg]
-        },
-        %% Session supervisor — simple_one_for_one pool for chf_session workers.
-        #{
-            id       => chf_session_sup,
-            start    => {chf_session_sup, start_link, []},
-            restart  => permanent,
-            shutdown => infinity,
-            type     => supervisor,
-            modules  => [chf_session_sup]
+            modules  => [chf_session_sweeper]
         }
     ],
     {ok, {SupFlags, Children}}.
