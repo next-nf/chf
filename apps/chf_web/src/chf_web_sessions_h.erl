@@ -25,11 +25,11 @@ handle_get(Req0, State) ->
     end.
 
 list_sessions(Req0, State) ->
-    Ids = try
-        All = ets:tab2list(chf_session_by_id),
-        [Id || {Id, _Pid} <- All]
-    catch
-        _:_ -> []
+    Ids = case chf_db:session_list_active() of
+        {ok, Sessions} ->
+            [S#charging_session.session_id || S <- Sessions];
+        _ ->
+            []
     end,
     reply(200, #{<<"session_ids">> => Ids, <<"count">> => length(Ids)}, Req0, State).
 

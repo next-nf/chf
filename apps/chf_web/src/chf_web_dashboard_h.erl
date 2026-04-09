@@ -49,10 +49,9 @@ collect_metrics() ->
     }.
 
 active_session_count() ->
-    try
-        ets:info(chf_session_by_id, size)
-    catch
-        _:_ -> 0
+    case chf_db:session_list_active() of
+        {ok, Sessions} -> length(Sessions);
+        _              -> 0
     end.
 
 diameter_services() ->
