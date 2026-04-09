@@ -29,7 +29,8 @@
     %% Session
     session_store/1,
     session_lookup/1,
-    session_delete/1
+    session_delete/1,
+    session_list_active/0
 ]).
 
 -define(PT_KEY, {chf_db, backend}).
@@ -126,6 +127,10 @@ session_lookup(SessionId) ->
 -spec session_delete(SessionId :: binary()) -> ok | {error, term()}.
 session_delete(SessionId) ->
     (backend()):session_delete(SessionId).
+
+-spec session_list_active() -> {ok, [#charging_session{}]}.
+session_list_active() ->
+    (backend()):session_list_active().
 
 %%====================================================================
 %% Internal helpers

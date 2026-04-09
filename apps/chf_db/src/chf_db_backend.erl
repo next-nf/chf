@@ -67,3 +67,6 @@
 
 %% Delete a charging session by SessionId.
 -callback session_delete(SessionId :: binary()) -> ok | {error, term()}.
+
+%% List all active charging sessions.
+-callback session_list_active() -> {ok, [#charging_session{}]}.

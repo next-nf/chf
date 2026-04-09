@@ -19,7 +19,8 @@
     cdr_list/1,
     session_store/1,
     session_lookup/1,
-    session_delete/1
+    session_delete/1,
+    session_list_active/0
 ]).
 
 %%====================================================================
@@ -41,7 +42,7 @@ init(_Opts) ->
                       [{index, [#subscriber.msisdn]}]),
     ok = ensure_table(balance,    record_info(fields, balance),    disc_copies, []),
     ok = ensure_table(cdr,        record_info(fields, cdr),        disc_copies, []),
-    ok = ensure_table(charging_session, record_info(fields, charging_session), ram_copies, []),
+    ok = ensure_table(charging_session, record_info(fields, charging_session), disc_copies, []),
     ok = mnesia:wait_for_tables([subscriber, balance, cdr, charging_session], 30000).
 
 %%--------------------------------------------------------------------
@@ -270,4 +271,23 @@ session_delete(SessionId) ->
         ok -> ok;
         {error, _} = Err -> Err;
         Aborted -> {error, Aborted}
+    end.
+
+-spec session_list_active() -> {ok, [#charging_session{}]}.
+session_list_active() ->
+    Pattern = #charging_session{
+        session_id    = '_',
+        imsi          = '_',
+        type          = '_',
+        state         = active,
+        granted_units = '_',
+        used_units    = '_',
+        created_at    = '_',
+        updated_at    = '_'
+    },
+    F = fun() -> mnesia:match_object(Pattern) end,
+    case mnesia:activity(transaction, F) of
+        Sessions when is_list(Sessions) -> {ok, Sessions};
+        {error, _} = Err                -> Err;
+        _Other                          -> {ok, []}
     end.
