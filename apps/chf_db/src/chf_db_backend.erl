@@ -90,7 +90,7 @@
 -callback session_delete(SessionId :: binary()) -> ok | {error, term()}.
 
 %% List all active charging sessions.
--callback session_list_active() -> {ok, [#charging_session{}]}.
+-callback session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
 
 %% Run Fun against the current session record (or undefined) inside a single
 %% backend transaction holding a write lock on the session id. Fun returns:

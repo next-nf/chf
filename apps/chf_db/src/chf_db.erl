@@ -152,7 +152,7 @@ session_lookup(SessionId) ->
 session_delete(SessionId) ->
     (backend()):session_delete(SessionId).
 
--spec session_list_active() -> {ok, [#charging_session{}]}.
+-spec session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
 session_list_active() ->
     (backend()):session_list_active().
 
