@@ -134,4 +134,7 @@ concurrent_updates_no_lost_usage(_) ->
     [receive {done, _} -> ok end || _ <- lists:seq(1, N)],
     {ok, S} = chf_db:session_lookup(<<"s">>),
     ?assertEqual(N * 100, maps:get(1, S#charging_session.used_units)),
+    B = balance(<<"a">>),
+    ?assertEqual(100000000 - (N * 100), B#balance.total),
+    ?assertEqual(1000 + (N * 900), B#balance.reserved),
     assert_invariant(<<"a">>).
