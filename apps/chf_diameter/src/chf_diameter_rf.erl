@@ -45,9 +45,10 @@
          handle_request/3]).
 
 %% DIAMETER result codes
--define(DIAMETER_SUCCESS,         2001).
--define(DIAMETER_UNABLE_TO_COMPLY, 5012).
--define(DIAMETER_USER_UNKNOWN,    5030).
+-define(DIAMETER_SUCCESS,           2001).
+-define(DIAMETER_UNABLE_TO_COMPLY,  5012).
+-define(DIAMETER_USER_UNKNOWN,      5030).
+-define(DIAMETER_UNKNOWN_SESSION_ID, 5002).
 
 %% Accounting-Record-Type values
 -define(ART_EVENT,   1).
@@ -230,7 +231,8 @@ ensure_imsi(_, _) ->
 %% Error code mapping
 %%====================================================================
 
-error_code(subscriber_not_found)  -> ?DIAMETER_USER_UNKNOWN;
-error_code(subscriber_suspended)  -> ?DIAMETER_UNABLE_TO_COMPLY;
-error_code(not_found)             -> ?DIAMETER_USER_UNKNOWN;
-error_code(_)                     -> ?DIAMETER_UNABLE_TO_COMPLY.
+error_code(subscriber_not_found) -> ?DIAMETER_USER_UNKNOWN;
+error_code(subscriber_suspended) -> ?DIAMETER_UNABLE_TO_COMPLY;
+error_code(not_found)            -> ?DIAMETER_UNKNOWN_SESSION_ID;
+error_code(session_terminated)   -> ?DIAMETER_UNKNOWN_SESSION_ID;
+error_code(_)                    -> ?DIAMETER_UNABLE_TO_COMPLY.

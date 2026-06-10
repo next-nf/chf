@@ -23,6 +23,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("chf_diameter/include/diameter_3gpp_ts32_299_ro.hrl").
+-include_lib("chf_diameter/include/diameter_3gpp_ts32_299_rf.hrl").
 
 -define(END_USER_E164, 0).
 -define(END_USER_IMSI, 1).
@@ -39,7 +40,8 @@ all() ->
      extract_mscc_ro_single,
      extract_mscc_ro_empty,
      build_mscc_response_single,
-     build_mscc_response_empty].
+     build_mscc_response_empty,
+     extract_used_units_rf_from_ps_information].
 
 init_per_suite(Config) ->
     Config.
@@ -135,3 +137,17 @@ build_mscc_response_single(_Config) ->
 
 build_mscc_response_empty(_Config) ->
     ?assertEqual([], chf_diameter_avp:build_mscc_response(#{})).
+
+%%====================================================================
+%% Test cases: extract_used_units_rf/1
+%%====================================================================
+
+extract_used_units_rf_from_ps_information(_Config) ->
+    TDV = #'diameter_rf_Traffic-Data-Volumes'{
+        'Accounting-Input-Octets'  = [1000],
+        'Accounting-Output-Octets' = [500]
+    },
+    PS = #'diameter_rf_PS-Information'{'Traffic-Data-Volumes' = [TDV]},
+    SI = #'diameter_rf_Service-Information'{'PS-Information' = [PS]},
+    Result = chf_diameter_avp:extract_used_units_rf([SI]),
+    ?assertEqual([#{rating_group => 0, used_units => 1500}], Result).
