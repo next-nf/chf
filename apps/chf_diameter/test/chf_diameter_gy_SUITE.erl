@@ -1,0 +1,205 @@
+%% SPDX-License-Identifier: AGPL-3.0-or-later
+%%
+%% Copyright (C) 2026 Nathan Foster <next-nf@proton.me>
+%%
+%% This program is free software: you can redistribute it and/or modify
+%% it under the terms of the GNU Affero General Public License as
+%% published by the Free Software Foundation, either version 3 of the
+%% License, or (at your option) any later version.
+%%
+%% This program is distributed in the hope that it will be useful,
+%% but WITHOUT ANY WARRANTY; without even the implied warranty of
+%% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+%% GNU Affero General Public License for more details.
+%%
+%% You should have received a copy of the GNU Affero General Public License
+%% along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+%% chf_diameter_gy_SUITE.erl — CT tests for chf_diameter_gy:handle_request/3.
+%%
+%% Mocks chf_core to isolate the Gy handler from the charging engine.
+-module(chf_diameter_gy_SUITE).
+
+-compile(export_all).
+
+-include_lib("common_test/include/ct.hrl").
+-include_lib("eunit/include/eunit.hrl").
+-include_lib("diameter/include/diameter.hrl").
+-include_lib("chf_diameter/include/diameter_3gpp_ts32_299_ro.hrl").
+
+-define(END_USER_IMSI,  1).
+-define(CCR_INITIAL,    1).
+-define(CCR_UPDATE,     2).
+-define(CCR_TERMINATE,  3).
+
+-define(DIAMETER_SUCCESS,          2001).
+-define(DIAMETER_UNABLE_TO_COMPLY, 5012).
+-define(DIAMETER_USER_UNKNOWN,     5030).
+
+%%====================================================================
+%% CT callbacks
+%%====================================================================
+
+all() ->
+    [ccr_initial_success,
+     ccr_initial_no_imsi,
+     ccr_initial_core_error,
+     ccr_update_success,
+     ccr_terminate_success,
+     ccr_unknown_error].
+
+init_per_suite(Config) ->
+    Config.
+
+end_per_suite(_Config) ->
+    ok.
+
+init_per_testcase(_TestCase, Config) ->
+    meck:new(chf_core, [non_strict, no_link]),
+    Config.
+
+end_per_testcase(_TestCase, _Config) ->
+    meck:unload(chf_core),
+    ok.
+
+%%====================================================================
+%% Helpers
+%%====================================================================
+
+make_caps() ->
+    #diameter_caps{
+        origin_host  = {<<"chf.example.com">>, <<"peer.example.com">>},
+        origin_realm = {<<"example.com">>, <<"peer.example.com">>},
+        vendor_id    = 0,
+        product_name = <<"test">>
+    }.
+
+make_sub_id_imsi(Imsi) ->
+    #'diameter_ro_Subscription-Id'{
+        'Subscription-Id-Type' = ?END_USER_IMSI,
+        'Subscription-Id-Data' = Imsi
+    }.
+
+make_rsu(Octets) ->
+    #'diameter_ro_Requested-Service-Unit'{
+        'CC-Total-Octets' = [Octets]
+    }.
+
+make_usu(Octets) ->
+    #'diameter_ro_Used-Service-Unit'{
+        'CC-Total-Octets' = [Octets]
+    }.
+
+make_mscc(RG, RequestedOctets, UsedOctets) ->
+    #'diameter_ro_Multiple-Services-Credit-Control'{
+        'Rating-Group'           = [RG],
+        'Requested-Service-Unit' = [make_rsu(RequestedOctets)],
+        'Used-Service-Unit'      = [make_usu(UsedOctets)]
+    }.
+
+make_ccr(SessionId, ReqType, SubIdList, MSCCList) ->
+    #diameter_ro_CCR{
+        'Session-Id'                       = SessionId,
+        'Origin-Host'                      = <<"peer.example.com">>,
+        'Origin-Realm'                     = <<"peer.example.com">>,
+        'Destination-Realm'                = <<"example.com">>,
+        'Auth-Application-Id'              = 4,
+        'Service-Context-Id'               = <<"32251@3gpp.org">>,
+        'CC-Request-Type'                  = ReqType,
+        'CC-Request-Number'                = 0,
+        'Subscription-Id'                  = SubIdList,
+        'Multiple-Services-Credit-Control' = MSCCList
+    }.
+
+call_handler(CCR) ->
+    Packet = #diameter_packet{msg = CCR},
+    Caps   = make_caps(),
+    PeerRef = make_ref(),
+    chf_diameter_gy:handle_request(Packet, <<"chf_gy">>, {PeerRef, Caps}).
+
+%%====================================================================
+%% Test cases
+%%====================================================================
+
+ccr_initial_success(_Config) ->
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"test-session">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) -> {ok, #{1 => 5000000}} end),
+
+    SessionId = <<"test-session-1">>,
+    SubId = make_sub_id_imsi(<<"001010123456789">>),
+    MSCC  = make_mscc(1, 10000000, 0),
+    CCR   = make_ccr(SessionId, ?CCR_INITIAL, [SubId], [MSCC]),
+
+    Result = call_handler(CCR),
+
+    ?assertMatch({reply, #diameter_ro_CCA{
+        'Result-Code' = ?DIAMETER_SUCCESS
+    }}, Result),
+
+    {reply, CCA} = Result,
+    ?assertEqual(SessionId, CCA#diameter_ro_CCA.'Session-Id'),
+    ?assertEqual(1, length(CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control')).
+
+ccr_initial_no_imsi(_Config) ->
+    SessionId = <<"test-session-no-imsi">>,
+    CCR = make_ccr(SessionId, ?CCR_INITIAL, [], []),
+
+    Result = call_handler(CCR),
+
+    ?assertMatch({reply, #diameter_ro_CCA{
+        'Result-Code' = ?DIAMETER_USER_UNKNOWN
+    }}, Result).
+
+ccr_initial_core_error(_Config) ->
+    meck:expect(chf_core, create_session, fun(_) -> {error, subscriber_not_found} end),
+
+    SessionId = <<"test-session-no-sub">>,
+    SubId = make_sub_id_imsi(<<"001010000000001">>),
+    CCR   = make_ccr(SessionId, ?CCR_INITIAL, [SubId], []),
+
+    Result = call_handler(CCR),
+
+    ?assertMatch({reply, #diameter_ro_CCA{
+        'Result-Code' = ?DIAMETER_USER_UNKNOWN
+    }}, Result).
+
+ccr_update_success(_Config) ->
+    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 5000000}} end),
+
+    SessionId = <<"test-session-update">>,
+    MSCC = make_mscc(1, 10000000, 3000000),
+    CCR  = make_ccr(SessionId, ?CCR_UPDATE, [], [MSCC]),
+
+    Result = call_handler(CCR),
+
+    ?assertMatch({reply, #diameter_ro_CCA{
+        'Result-Code' = ?DIAMETER_SUCCESS
+    }}, Result).
+
+ccr_terminate_success(_Config) ->
+    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
+
+    SessionId = <<"test-session-term">>,
+    MSCC = make_mscc(1, 0, 5000000),
+    CCR  = make_ccr(SessionId, ?CCR_TERMINATE, [], [MSCC]),
+
+    Result = call_handler(CCR),
+
+    ?assertMatch({reply, #diameter_ro_CCA{
+        'Result-Code' = ?DIAMETER_SUCCESS
+    }}, Result).
+
+ccr_unknown_error(_Config) ->
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"test-session">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) -> {error, something_unexpected} end),
+
+    SessionId = <<"test-session-err">>,
+    SubId = make_sub_id_imsi(<<"001010123456789">>),
+    MSCC  = make_mscc(1, 10000000, 0),
+    CCR   = make_ccr(SessionId, ?CCR_INITIAL, [SubId], [MSCC]),
+
+    Result = call_handler(CCR),
+
+    ?assertMatch({reply, #diameter_ro_CCA{
+        'Result-Code' = ?DIAMETER_UNABLE_TO_COMPLY
+    }}, Result).
