@@ -129,18 +129,14 @@ balance_get(AccountId) ->
     {ok, #balance{}} | {error, term()}.
 balance_topup(AccountId, Amount) ->
     F = fun() ->
-        B0 = case mnesia:read(balance, AccountId) of
+        B0 = case mnesia:read(balance, AccountId, write) of
             [Existing] -> Existing;
-            []         ->
-                #balance{account_id = AccountId,
-                         total      = 0,
-                         reserved   = 0,
-                         available  = 0}
+            []         -> #balance{account_id = AccountId,
+                                   total = 0, reserved = 0, available = 0}
         end,
-        B1 = B0#balance{
-            total     = B0#balance.total     + Amount,
-            available = B0#balance.available + Amount
-        },
+        NewTotal = B0#balance.total + Amount,
+        B1 = B0#balance{total     = NewTotal,
+                        available = NewTotal - B0#balance.reserved},
         ok = mnesia:write(B1),
         B1
     end,
@@ -150,16 +146,15 @@ balance_topup(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_reserve(AccountId, Amount) ->
     F = fun() ->
-        case mnesia:read(balance, AccountId) of
+        case mnesia:read(balance, AccountId, write) of
             [] ->
                 mnesia:abort(not_found);
             [#balance{available = Avail}] when Avail < Amount ->
                 mnesia:abort(insufficient_balance);
             [#balance{} = B0] ->
-                B1 = B0#balance{
-                    available = B0#balance.available - Amount,
-                    reserved  = B0#balance.reserved  + Amount
-                },
+                NewReserved = B0#balance.reserved + Amount,
+                B1 = B0#balance{reserved  = NewReserved,
+                                available = B0#balance.total - NewReserved},
                 ok = mnesia:write(B1),
                 B1
         end
@@ -170,16 +165,17 @@ balance_reserve(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_commit(AccountId, Amount) ->
     F = fun() ->
-        case mnesia:read(balance, AccountId) of
+        case mnesia:read(balance, AccountId, write) of
             [] ->
                 mnesia:abort(not_found);
             [#balance{} = B0] ->
-                NewReserved = max(0, B0#balance.reserved - Amount),
-                NewTotal    = B0#balance.total - Amount,
-                B1 = B0#balance{
-                    total    = NewTotal,
-                    reserved = NewReserved
-                },
+                %% Never commit more than is reserved.
+                Commit      = min(max(0, Amount), B0#balance.reserved),
+                NewReserved = B0#balance.reserved - Commit,
+                NewTotal    = B0#balance.total    - Commit,
+                B1 = B0#balance{total     = NewTotal,
+                                reserved  = NewReserved,
+                                available = NewTotal - NewReserved},
                 ok = mnesia:write(B1),
                 B1
         end
@@ -190,16 +186,15 @@ balance_commit(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_refund(AccountId, Amount) ->
     F = fun() ->
-        case mnesia:read(balance, AccountId) of
+        case mnesia:read(balance, AccountId, write) of
             [] ->
                 mnesia:abort(not_found);
             [#balance{} = B0] ->
-                NewReserved  = max(0, B0#balance.reserved  - Amount),
-                NewAvailable = B0#balance.available + Amount,
-                B1 = B0#balance{
-                    reserved  = NewReserved,
-                    available = NewAvailable
-                },
+                %% Never refund more than is reserved.
+                Refund      = min(max(0, Amount), B0#balance.reserved),
+                NewReserved = B0#balance.reserved - Refund,
+                B1 = B0#balance{reserved  = NewReserved,
+                                available = B0#balance.total - NewReserved},
                 ok = mnesia:write(B1),
                 B1
         end
