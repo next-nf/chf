@@ -93,8 +93,7 @@ subscriber_create(#subscriber{} = Sub) ->
 
 -spec subscriber_lookup(Imsi :: binary()) -> {ok, #subscriber{}} | {error, not_found}.
 subscriber_lookup(Imsi) ->
-    F = fun() -> mnesia:read(subscriber, Imsi) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:read(subscriber, Imsi) end) of
         [#subscriber{} = Sub] -> {ok, Sub};
         []                    -> {error, not_found};
         {error, _} = Err      -> Err
@@ -102,20 +101,16 @@ subscriber_lookup(Imsi) ->
 
 -spec subscriber_update(#subscriber{}) -> ok | {error, term()}.
 subscriber_update(#subscriber{} = Sub) ->
-    F = fun() -> mnesia:write(Sub) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:write(Sub) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec subscriber_delete(Imsi :: binary()) -> ok | {error, term()}.
 subscriber_delete(Imsi) ->
-    F = fun() -> mnesia:delete({subscriber, Imsi}) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:delete({subscriber, Imsi}) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 %%====================================================================
@@ -124,8 +119,7 @@ subscriber_delete(Imsi) ->
 
 -spec balance_get(AccountId :: binary()) -> {ok, #balance{}} | {error, not_found}.
 balance_get(AccountId) ->
-    F = fun() -> mnesia:read(balance, AccountId) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:read(balance, AccountId) end) of
         [#balance{} = B] -> {ok, B};
         []               -> {error, not_found};
         {error, _} = Err -> Err
@@ -239,11 +233,9 @@ activity(F) ->
 
 -spec cdr_write(#cdr{}) -> ok | {error, term()}.
 cdr_write(#cdr{} = Cdr) ->
-    F = fun() -> mnesia:write(Cdr) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:write(Cdr) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]}.
@@ -260,11 +252,9 @@ cdr_list(Filters) ->
         timestamp    = '_',
         metadata     = '_'
     },
-    F = fun() -> mnesia:match_object(Pattern) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:match_object(Pattern) end) of
         Cdrs when is_list(Cdrs) -> {ok, Cdrs};
-        {error, _} = Err        -> Err;
-        _Other                  -> {ok, []}
+        {error, _} = Err        -> Err
     end.
 
 %%====================================================================
@@ -273,18 +263,15 @@ cdr_list(Filters) ->
 
 -spec session_store(#charging_session{}) -> ok | {error, term()}.
 session_store(#charging_session{} = Session) ->
-    F = fun() -> mnesia:write(Session) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:write(Session) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec session_lookup(SessionId :: binary()) ->
     {ok, #charging_session{}} | {error, not_found}.
 session_lookup(SessionId) ->
-    F = fun() -> mnesia:read(charging_session, SessionId) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:read(charging_session, SessionId) end) of
         [#charging_session{} = S] -> {ok, S};
         []                        -> {error, not_found};
         {error, _} = Err          -> Err
@@ -292,11 +279,9 @@ session_lookup(SessionId) ->
 
 -spec session_delete(SessionId :: binary()) -> ok | {error, term()}.
 session_delete(SessionId) ->
-    F = fun() -> mnesia:delete({charging_session, SessionId}) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:delete({charging_session, SessionId}) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
