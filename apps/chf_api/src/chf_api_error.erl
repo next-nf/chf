@@ -64,6 +64,6 @@ reason_to_problem(insufficient_balance) ->
 reason_to_problem(subscriber_not_found) ->
     {404, <<"USER_UNKNOWN">>, <<"Unknown subscriber">>};
 reason_to_problem(subscriber_suspended) ->
-    {403, <<"USER_UNKNOWN">>, <<"Subscriber is not active">>};
+    {403, <<"SUBSCRIPTION_NOT_ACTIVE">>, <<"Subscriber is not active">>};
 reason_to_problem(_) ->
     {500, <<"INTERNAL_ERROR">>, <<"Internal charging error">>}.
