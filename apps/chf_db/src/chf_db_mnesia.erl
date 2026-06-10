@@ -38,7 +38,8 @@
     session_store/1,
     session_lookup/1,
     session_delete/1,
-    session_list_active/0
+    session_list_active/0,
+    session_transaction/2
 ]).
 
 %%====================================================================
@@ -84,12 +85,16 @@ ensure_table(Name, Fields, StorageType, ExtraOpts) ->
 %%====================================================================
 
 -spec subscriber_create(#subscriber{}) -> ok | {error, term()}.
-subscriber_create(#subscriber{} = Sub) ->
-    F = fun() -> mnesia:write(Sub) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+subscriber_create(#subscriber{imsi = Imsi} = Sub) ->
+    F = fun() ->
+        case mnesia:read(subscriber, Imsi, write) of
+            [_] -> mnesia:abort(already_exists);
+            []  -> mnesia:write(Sub)
+        end
+    end,
+    case activity(F) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec subscriber_lookup(Imsi :: binary()) -> {ok, #subscriber{}} | {error, not_found}.
@@ -309,3 +314,23 @@ session_list_active() ->
         L when is_list(L)  -> {ok, L};
         {error, _} = Err   -> Err
     end.
+
+-spec session_transaction(SessionId :: binary(), Fun :: fun()) ->
+    term() | {error, term()}.
+session_transaction(SessionId, Fun) ->
+    F = fun() ->
+        Current = case mnesia:read(charging_session, SessionId, write) of
+            [#charging_session{} = S] -> S;
+            []                        -> undefined
+        end,
+        case Fun(Current) of
+            {commit, #charging_session{} = New, Result} ->
+                ok = mnesia:write(New),
+                Result;
+            {result, Result} ->
+                Result;
+            {abort, Reason} ->
+                mnesia:abort({chf_session_abort, Reason})
+        end
+    end,
+    activity(F).

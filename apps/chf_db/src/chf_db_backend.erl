@@ -91,3 +91,10 @@
 
 %% List all active charging sessions.
 -callback session_list_active() -> {ok, [#charging_session{}]}.
+
+%% Run Fun against the current session record (or undefined) inside a single
+%% backend transaction holding a write lock on the session id. Fun returns:
+%%   {commit, NewSession, Result} — write NewSession, return Result
+%%   {result, Result}             — write nothing, return Result
+%%   {abort, Reason}              — roll back, return {error, Reason}
+-callback session_transaction(SessionId :: binary(), Fun :: fun()) -> term() | {error, term()}.
