@@ -135,6 +135,8 @@ handle_create(Fields, Req, State) ->
                     Body = chf_provision_json:encode_subscriber(Sub),
                     Req2 = cowboy_req:set_resp_body(Body, Req),
                     {{created, <<"/api/v1/subscribers/", Imsi/binary>>}, Req2, State};
+                {error, already_exists} ->
+                    reply_error(409, <<"subscriber already exists">>, Req, State);
                 {error, Err} ->
                     reply_error(500, format_error(Err), Req, State)
             end
@@ -144,6 +146,8 @@ handle_create(Fields, Req, State) ->
 %% Update logic
 %%====================================================================
 
+handle_update(_Fields, Req, #state{subscriber = undefined} = State) ->
+    reply_error(404, <<"subscriber not found">>, Req, State);
 handle_update(Fields, Req, #state{subscriber = Existing} = State) ->
     Now = erlang:system_time(millisecond),
     Updated = Existing#subscriber{
@@ -170,8 +174,11 @@ handle_update(Fields, Req, #state{subscriber = Existing} = State) ->
 
 validate_create_fields(Fields) ->
     case {maps:find(imsi, Fields), maps:find(msisdn, Fields), maps:find(account_id, Fields)} of
-        {{ok, Imsi}, {ok, Msisdn}, {ok, AccountId}} ->
+        {{ok, Imsi}, {ok, Msisdn}, {ok, AccountId}}
+          when is_binary(Imsi), is_binary(Msisdn), is_binary(AccountId) ->
             {ok, Imsi, Msisdn, AccountId};
+        {{ok, _}, {ok, _}, {ok, _}} ->
+            {error, <<"imsi, msisdn and account_id must be strings">>};
         {{ok, _}, {ok, _}, error} ->
             {error, <<"missing required field: account_id">>};
         {{ok, _}, error, _} ->
