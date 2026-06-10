@@ -217,11 +217,20 @@ balance_refund(AccountId, Amount) ->
 %%--------------------------------------------------------------------
 -spec run_balance_txn(fun()) -> {ok, #balance{}} | {error, term()}.
 run_balance_txn(F) ->
-    case mnesia:activity(transaction, F) of
-        #balance{} = B          -> {ok, B};
-        {error, _} = Err        -> Err;
-        {aborted, Reason}       -> {error, Reason};
-        Aborted                 -> {error, Aborted}
+    case activity(F) of
+        #balance{} = B   -> {ok, B};
+        {error, _} = Err -> Err
+    end.
+
+%% Run a Mnesia activity, converting an abort exit into {error, Reason}.
+%% mnesia:activity/2 returns the fun's value on success and EXITS with
+%% {aborted, Reason} on abort, so callers must catch the exit here.
+-spec activity(fun()) -> term() | {error, term()}.
+activity(F) ->
+    try mnesia:activity(transaction, F)
+    catch
+        exit:{aborted, {chf_session_abort, Reason}} -> {error, Reason};
+        exit:{aborted, Reason}                      -> {error, Reason}
     end.
 
 %%====================================================================
@@ -290,21 +299,10 @@ session_delete(SessionId) ->
         Aborted -> {error, Aborted}
     end.
 
--spec session_list_active() -> {ok, [#charging_session{}]}.
+-spec session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
 session_list_active() ->
-    Pattern = #charging_session{
-        session_id    = '_',
-        imsi          = '_',
-        type          = '_',
-        state         = active,
-        granted_units = '_',
-        used_units    = '_',
-        created_at    = '_',
-        updated_at    = '_'
-    },
-    F = fun() -> mnesia:match_object(Pattern) end,
-    case mnesia:activity(transaction, F) of
-        Sessions when is_list(Sessions) -> {ok, Sessions};
-        {error, _} = Err                -> Err;
-        _Other                          -> {ok, []}
+    Pattern = #charging_session{state = active, _ = '_'},
+    case activity(fun() -> mnesia:match_object(Pattern) end) of
+        L when is_list(L)  -> {ok, L};
+        {error, _} = Err   -> Err
     end.
