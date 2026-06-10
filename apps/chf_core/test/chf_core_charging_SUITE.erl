@@ -28,7 +28,8 @@ all() ->
      reservation_returns_to_zero_after_lifecycle,
      duplicate_create_does_not_clobber,
      terminate_idempotent_no_double_refund,
-     concurrent_updates_no_lost_usage].
+     concurrent_updates_no_lost_usage,
+     sweeper_survives_stray_message].
 
 init_per_testcase(_TC, Config) -> setup_mnesia(), Config.
 end_per_testcase(_TC, _Config) -> mnesia:stop(), ok.
@@ -138,3 +139,19 @@ concurrent_updates_no_lost_usage(_) ->
     ?assertEqual(100000000 - (N * 100), B#balance.total),
     ?assertEqual(1000 + (N * 900), B#balance.reserved),
     assert_invariant(<<"a">>).
+
+sweeper_survives_stray_message(_) ->
+    application:set_env(chf_core, sweep_interval, 100),
+    application:set_env(chf_core, session_idle_timeout, 0),
+    ok = seed_subscriber(<<"001">>, <<"a">>, 1000000),
+    {ok, Pid} = chf_session_sweeper:start_link(),
+    %% Send a stray message and a stray call; neither must stop scheduling.
+    Pid ! random_noise,
+    try gen_server:call(Pid, status, 100) catch _:_ -> ok end,
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => online}),
+    {ok, _} = chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 5000, 0)]}),
+    %% Wait for a couple of sweep intervals; the stale session must be swept.
+    timer:sleep(400),
+    {ok, S} = chf_db:session_lookup(<<"s">>),
+    ?assertEqual(terminated, S#charging_session.state),
+    gen_server:stop(Pid).

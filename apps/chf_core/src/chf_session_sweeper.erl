@@ -52,7 +52,8 @@ init([]) ->
                                        ?DEFAULT_IDLE_TIMEOUT),
     ?LOG_INFO("Session sweeper started: interval=~wms idle_timeout=~wms",
               [Interval, IdleTimeout]),
-    {ok, #{interval => Interval, idle_timeout => IdleTimeout}, Interval}.
+    schedule(Interval),
+    {ok, #{interval => Interval, idle_timeout => IdleTimeout}}.
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -60,11 +61,10 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info(timeout, #{interval := Interval,
-                       idle_timeout := IdleTimeout} = State) ->
+handle_info(sweep, #{interval := Interval, idle_timeout := IdleTimeout} = State) ->
     sweep(IdleTimeout),
-    {noreply, State, Interval};
-
+    schedule(Interval),
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -72,19 +72,17 @@ handle_info(_Info, State) ->
 %% Internal
 %%====================================================================
 
+schedule(Interval) ->
+    erlang:send_after(Interval, self(), sweep).
+
 sweep(MaxAge) ->
-    Now = erlang:system_time(millisecond),
     case chf_db:session_list_active() of
         {ok, Sessions} ->
-            lists:foreach(fun(#charging_session{session_id = SId,
-                                                 updated_at = UpdatedAt}) ->
-                Age = Now - UpdatedAt,
-                if Age > MaxAge ->
-                    ?LOG_INFO("Sweeper: terminating stale session ~s (age=~wms)",
-                              [SId, Age]),
-                    _ = chf_core:session_terminate(SId, #{rating_groups => []});
-                   true ->
-                    ok
+            lists:foreach(fun(#charging_session{session_id = SId}) ->
+                case chf_core:session_terminate_if_stale(SId, MaxAge) of
+                    ok      -> ?LOG_INFO("Sweeper: terminated stale session ~s", [SId]);
+                    skipped -> ok;
+                    _Other  -> ok
                 end
             end, Sessions);
         _Error ->
