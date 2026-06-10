@@ -62,6 +62,10 @@
 %% Return Amount from reserved back to available (e.g. over-estimated grant).
 -callback balance_refund(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
+%% Set the absolute total balance; available is re-derived as total - reserved.
+%% Must abort with total_below_reserved if NewTotal < current reserved.
+-callback balance_set_total(AccountId :: binary(), NewTotal :: integer()) -> {ok, #balance{}} | {error, term()}.
+
 %% ------------------------------------------------------------------
 %% CDR operations
 %% ------------------------------------------------------------------

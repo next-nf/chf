@@ -27,7 +27,8 @@ all() ->
      reserve_missing_account_returns_error,
      commit_never_exceeds_reserved,
      refund_never_exceeds_reserved,
-     invariant_holds_after_ops].
+     invariant_holds_after_ops,
+     set_total_is_absolute_and_atomic].
 
 init_per_testcase(_TC, Config) ->
     setup_mnesia(),
@@ -90,3 +91,18 @@ invariant_holds_after_ops(_) ->
     true = B#balance.total >= 0,
     true = B#balance.reserved >= 0,
     true = B#balance.available >= 0.
+
+set_total_is_absolute_and_atomic(_) ->
+    ok = seed_balance(<<"acc">>, 100, 30),
+    {ok, B} = chf_db:balance_set_total(<<"acc">>, 200),
+    ?assertEqual(200, B#balance.total),
+    ?assertEqual(30,  B#balance.reserved),
+    ?assertEqual(170, B#balance.available),
+    %% Cannot set total below outstanding reservations.
+    ?assertEqual({error, total_below_reserved},
+                 chf_db:balance_set_total(<<"acc">>, 10)),
+    %% Creating a brand-new balance works too.
+    {ok, B2} = chf_db:balance_set_total(<<"fresh">>, 500),
+    ?assertEqual(500, B2#balance.total),
+    ?assertEqual(0,   B2#balance.reserved),
+    ?assertEqual(500, B2#balance.available).

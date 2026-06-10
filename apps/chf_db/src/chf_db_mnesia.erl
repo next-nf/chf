@@ -32,6 +32,7 @@
     balance_reserve/2,
     balance_commit/2,
     balance_refund/2,
+    balance_set_total/2,
     cdr_write/1,
     cdr_list/1,
     session_store/1,
@@ -195,6 +196,28 @@ balance_refund(AccountId, Amount) ->
                 NewReserved = B0#balance.reserved - Refund,
                 B1 = B0#balance{reserved  = NewReserved,
                                 available = B0#balance.total - NewReserved},
+                ok = mnesia:write(B1),
+                B1
+        end
+    end,
+    run_balance_txn(F).
+
+-spec balance_set_total(AccountId :: binary(), NewTotal :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+balance_set_total(AccountId, NewTotal) ->
+    F = fun() ->
+        Reserved = case mnesia:read(balance, AccountId, write) of
+            [#balance{reserved = R}] -> R;
+            []                       -> 0
+        end,
+        case NewTotal < Reserved of
+            true ->
+                mnesia:abort(total_below_reserved);
+            false ->
+                B1 = #balance{account_id = AccountId,
+                              total      = NewTotal,
+                              reserved   = Reserved,
+                              available  = NewTotal - Reserved},
                 ok = mnesia:write(B1),
                 B1
         end

@@ -39,6 +39,7 @@
     balance_reserve/2,
     balance_commit/2,
     balance_refund/2,
+    balance_set_total/2,
     %% CDR
     cdr_write/1,
     cdr_list/1,
@@ -110,6 +111,11 @@ balance_commit(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_refund(AccountId, Amount) ->
     (backend()):balance_refund(AccountId, Amount).
+
+-spec balance_set_total(AccountId :: binary(), NewTotal :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+balance_set_total(AccountId, NewTotal) ->
+    (backend()):balance_set_total(AccountId, NewTotal).
 
 %%====================================================================
 %% CDR operations
