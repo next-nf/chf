@@ -19,8 +19,8 @@
 %%
 %% Scans the charging_session table for active sessions whose
 %% updated_at timestamp exceeds the idle timeout.  Stale sessions
-%% are terminated via chf_core:session_terminate/2 so that proper
-%% balance refunds and CDR finalization occur.
+%% are terminated via chf_core:session_terminate_if_stale/2 so that
+%% proper balance refunds and CDR finalization occur.
 -module(chf_session_sweeper).
 -behaviour(gen_server).
 
