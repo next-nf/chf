@@ -15,11 +15,6 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_core.erl — Public API for the CHF core charging engine.
-%%
-%% Orchestrates charging session lifecycle with DB-backed state.
-%% Session state is persisted in chf_db on every operation so it
-%% survives process crashes and node restarts.
 -module(chf_core).
 
 -include_lib("chf_db/include/chf_db.hrl").
@@ -29,21 +24,17 @@
     session_initial/2,
     session_update/2,
     session_terminate/2,
-    find_session/1
+    session_terminate_if_stale/2
 ]).
 
 %%====================================================================
 %% API
 %%====================================================================
 
-%% @doc Create a new charging session in the database.
-%%
-%% Info :: #{session_id => binary(), imsi => binary(),
-%%           type => online | offline | converged}
 -spec create_session(map()) -> {ok, binary()} | {error, term()}.
 create_session(#{session_id := SessionId, imsi := Imsi, type := Type}) ->
-    Now = erlang:system_time(millisecond),
-    Session = #charging_session{
+    Now = now_ms(),
+    New = #charging_session{
         session_id    = SessionId,
         imsi          = Imsi,
         type          = Type,
@@ -53,198 +44,193 @@ create_session(#{session_id := SessionId, imsi := Imsi, type := Type}) ->
         created_at    = Now,
         updated_at    = Now
     },
-    case chf_db:session_store(Session) of
-        ok -> {ok, SessionId};
-        {error, _} = Err -> Err
-    end.
+    chf_db:session_transaction(SessionId, fun
+        (undefined) ->
+            {commit, New, {ok, SessionId}};
+        (#charging_session{state = terminated}) ->
+            {commit, New, {ok, SessionId}};
+        (#charging_session{state = active}) ->
+            {abort, session_exists}
+    end).
 
-%% @doc Handle an initial charging request for a session.
 -spec session_initial(SessionId :: binary(), RequestData :: map()) ->
     {ok, map()} | {error, term()}.
 session_initial(SessionId, RequestData) ->
-    case chf_db:session_lookup(SessionId) of
-        {ok, #charging_session{state = active} = Session} ->
-            do_initial(Session, RequestData);
-        {ok, #charging_session{state = terminated}} ->
-            {error, session_terminated};
-        {error, not_found} ->
-            {error, not_found}
-    end.
+    chf_db:session_transaction(SessionId, fun
+        (#charging_session{state = active} = S) -> do_initial(S, RequestData);
+        (#charging_session{state = terminated}) -> {abort, session_terminated};
+        (undefined)                             -> {abort, not_found}
+    end).
 
-%% @doc Handle an update (interim) charging request.
 -spec session_update(SessionId :: binary(), RequestData :: map()) ->
     {ok, map()} | {error, term()}.
 session_update(SessionId, RequestData) ->
-    case chf_db:session_lookup(SessionId) of
-        {ok, #charging_session{state = active} = Session} ->
-            do_update(Session, RequestData);
-        {ok, #charging_session{state = terminated}} ->
-            {error, session_terminated};
-        {error, not_found} ->
-            {error, not_found}
-    end.
+    chf_db:session_transaction(SessionId, fun
+        (#charging_session{state = active} = S) -> do_update(S, RequestData);
+        (#charging_session{state = terminated}) -> {abort, session_terminated};
+        (undefined)                             -> {abort, not_found}
+    end).
 
-%% @doc Handle a terminate request for a session.
 -spec session_terminate(SessionId :: binary(), RequestData :: map()) ->
     ok | {error, term()}.
 session_terminate(SessionId, RequestData) ->
-    case chf_db:session_lookup(SessionId) of
-        {ok, #charging_session{state = active} = Session} ->
-            do_terminate(Session, RequestData);
-        {ok, #charging_session{state = terminated}} ->
-            ok;
-        {error, not_found} ->
-            {error, not_found}
-    end.
+    chf_db:session_transaction(SessionId, fun
+        (#charging_session{state = active} = S) -> do_terminate(S, RequestData);
+        (#charging_session{state = terminated}) -> {result, ok};
+        (undefined)                             -> {abort, not_found}
+    end).
 
-%% @doc Look up a session by ID.
--spec find_session(SessionId :: binary()) ->
-    {ok, #charging_session{}} | {error, not_found}.
-find_session(SessionId) ->
-    chf_db:session_lookup(SessionId).
+%% @doc Terminate a session only if it is still stale (used by the sweeper).
+%% The staleness re-check happens under the session write lock against the
+%% current record, closing the snapshot race.
+-spec session_terminate_if_stale(SessionId :: binary(), MaxAge :: integer()) ->
+    ok | skipped | {error, term()}.
+session_terminate_if_stale(SessionId, MaxAge) ->
+    Now = now_ms(),
+    chf_db:session_transaction(SessionId, fun
+        (#charging_session{state = active, updated_at = U} = S)
+          when (Now - U) > MaxAge ->
+            do_terminate(S, #{rating_groups => []});
+        (#charging_session{state = active}) ->
+            {result, skipped};
+        (#charging_session{state = terminated}) ->
+            {result, ok};
+        (undefined) ->
+            {result, {error, not_found}}
+    end).
 
 %%====================================================================
 %% Internal — Initial
 %%====================================================================
 
-do_initial(#charging_session{type = Type, imsi = Imsi,
-                              session_id = SessionId} = Session,
+do_initial(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
+                             granted_units = Outstanding0} = Session,
            RequestData) ->
     RatingGroups = maps:get(rating_groups, RequestData, []),
-
-    OnlineResult =
-        case Type of
-            T when T =:= online; T =:= converged ->
-                chf_online:initial_request(Imsi, RatingGroups);
-            offline ->
-                {ok, #{}}
-        end,
-
-    case Type of
-        T2 when T2 =:= offline; T2 =:= converged ->
-            chf_offline:initial_request(Imsi, SessionId);
-        online ->
-            ok
+    OnlineResult = case is_online(Type) of
+        true  -> chf_online:initial_request(Imsi, RatingGroups);
+        false -> {ok, #{}}
     end,
-
     case OnlineResult of
         {ok, GrantedMap} ->
-            NewGranted = maps:merge(Session#charging_session.granted_units,
-                                    GrantedMap),
+            _ = maybe_offline_initial(Type, Imsi, SessionId),
+            NewOutstanding = add_grants(Outstanding0, GrantedMap),
             Updated = Session#charging_session{
-                granted_units = NewGranted,
-                updated_at    = erlang:system_time(millisecond)
+                granted_units = NewOutstanding,
+                updated_at    = now_ms()
             },
-            chf_db:session_store(Updated),
-            {ok, GrantedMap};
+            {commit, Updated, {ok, GrantedMap}};
         {error, Reason} ->
-            {error, Reason}
+            {abort, Reason}
     end.
 
 %%====================================================================
 %% Internal — Update
 %%====================================================================
 
-do_update(#charging_session{type = Type, imsi = Imsi,
-                             session_id = SessionId} = Session,
+do_update(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
+                            granted_units = Outstanding0,
+                            used_units = Used0} = Session,
           RequestData) ->
     RatingGroups = maps:get(rating_groups, RequestData, []),
-
-    %% Accumulate used units from this update into session totals.
-    NewUsed = lists:foldl(fun(RG, Acc) ->
-        RGId = maps:get(rating_group, RG),
-        Used = maps:get(used_units, RG, 0),
-        Prev = maps:get(RGId, Acc, 0),
-        Acc#{RGId => Prev + Used}
-    end, Session#charging_session.used_units, RatingGroups),
-
-    OnlineResult =
-        case Type of
-            T when T =:= online; T =:= converged ->
-                chf_online:update_request(Imsi, RatingGroups);
-            offline ->
-                {ok, #{}}
-        end,
-
-    case Type of
-        T2 when T2 =:= offline; T2 =:= converged ->
-            chf_offline:update_request(Imsi, #{
-                session_id    => SessionId,
-                rating_groups => RatingGroups
-            });
-        online -> ok
+    UsedThis = used_map(RatingGroups),
+    NewUsed  = merge_add(Used0, UsedThis),
+    OnlineResult = case is_online(Type) of
+        true  -> chf_online:update_request(Imsi, RatingGroups);
+        false -> {ok, #{}}
     end,
-
     case OnlineResult of
         {ok, GrantedMap} ->
-            NewGranted = maps:merge(Session#charging_session.granted_units,
-                                    GrantedMap),
+            _ = maybe_offline_update(Type, Imsi, SessionId, RatingGroups),
+            Outstanding1   = subtract_used(Outstanding0, UsedThis),
+            NewOutstanding = add_grants(Outstanding1, GrantedMap),
             Updated = Session#charging_session{
-                granted_units = NewGranted,
+                granted_units = NewOutstanding,
                 used_units    = NewUsed,
-                updated_at    = erlang:system_time(millisecond)
+                updated_at    = now_ms()
             },
-            chf_db:session_store(Updated),
-            {ok, GrantedMap};
+            {commit, Updated, {ok, GrantedMap}};
         {error, Reason} ->
-            %% Still persist the used_units even on error.
-            Updated = Session#charging_session{
-                used_units = NewUsed,
-                updated_at = erlang:system_time(millisecond)
-            },
-            chf_db:session_store(Updated),
-            {error, Reason}
+            {abort, Reason}
     end.
 
 %%====================================================================
 %% Internal — Terminate
 %%====================================================================
 
-do_terminate(#charging_session{type = Type, imsi = Imsi,
-                                session_id = SessionId,
-                                granted_units = Granted,
-                                used_units = UsedSoFar} = Session,
+do_terminate(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
+                               granted_units = Outstanding0,
+                               used_units = Used0} = Session,
              RequestData) ->
     RatingGroups = maps:get(rating_groups, RequestData, []),
+    UsedThis  = used_map(RatingGroups),
+    FinalUsed = merge_add(Used0, UsedThis),
+    RGKeys = lists:usort(maps:keys(Outstanding0) ++ maps:keys(UsedThis)),
+    Instr = [#{rating_group   => RG,
+               used_units     => maps:get(RG, UsedThis, 0),
+               reserved_units => maps:get(RG, Outstanding0, 0)} || RG <- RGKeys],
+    _ = case is_online(Type) of
+        true  -> chf_online:terminate_request(Imsi, Instr);
+        false -> ok
+    end,
+    _ = maybe_offline_terminate(Type, Imsi, SessionId, FinalUsed),
+    Terminated = Session#charging_session{
+        state         = terminated,
+        granted_units = #{},
+        used_units    = FinalUsed,
+        updated_at    = now_ms()
+    },
+    {commit, Terminated, ok}.
 
-    %% Merge any final used_units from the terminate request.
-    FinalUsed = lists:foldl(fun(RG, Acc) ->
+%%====================================================================
+%% Internal — offline dispatch
+%%====================================================================
+
+maybe_offline_initial(Type, Imsi, SessionId) when Type =:= offline; Type =:= converged ->
+    chf_offline:initial_request(Imsi, SessionId);
+maybe_offline_initial(_, _, _) ->
+    ok.
+
+maybe_offline_update(Type, Imsi, SessionId, RatingGroups)
+  when Type =:= offline; Type =:= converged ->
+    chf_offline:update_request(Imsi, #{session_id => SessionId,
+                                       rating_groups => RatingGroups});
+maybe_offline_update(_, _, _, _) ->
+    ok.
+
+maybe_offline_terminate(Type, Imsi, SessionId, FinalUsed)
+  when Type =:= offline; Type =:= converged ->
+    RGs = [#{rating_group => RG, used_units => U} || {RG, U} <- maps:to_list(FinalUsed)],
+    chf_offline:terminate_request(Imsi, #{session_id => SessionId, rating_groups => RGs});
+maybe_offline_terminate(_, _, _, _) ->
+    ok.
+
+%%====================================================================
+%% Internal — helpers
+%%====================================================================
+
+is_online(online)    -> true;
+is_online(converged) -> true;
+is_online(offline)   -> false.
+
+now_ms() -> erlang:system_time(millisecond).
+
+used_map(RatingGroups) ->
+    lists:foldl(fun(RG, Acc) ->
         RGId = maps:get(rating_group, RG),
         Used = maps:get(used_units, RG, 0),
-        Prev = maps:get(RGId, Acc, 0),
-        Acc#{RGId => Prev + Used}
-    end, UsedSoFar, RatingGroups),
+        Acc#{RGId => maps:get(RGId, Acc, 0) + Used}
+    end, #{}, RatingGroups).
 
-    %% Build annotated RatingGroup list with granted amounts for refund.
-    AnnotatedRGs = maps:fold(fun(RGId, TotalUsed, Acc) ->
-        [#{rating_group  => RGId,
-           used_units    => TotalUsed,
-           granted_units => maps:get(RGId, Granted, 0)} | Acc]
-    end, [], FinalUsed),
+add_grants(Outstanding, GrantedMap) ->
+    maps:fold(fun(RGId, Granted, Acc) ->
+        Acc#{RGId => maps:get(RGId, Acc, 0) + Granted}
+    end, Outstanding, GrantedMap).
 
-    case Type of
-        T when T =:= online; T =:= converged ->
-            chf_online:terminate_request(Imsi, AnnotatedRGs);
-        offline -> ok
-    end,
+subtract_used(Outstanding, UsedThis) ->
+    maps:fold(fun(RGId, Used, Acc) ->
+        Acc#{RGId => max(0, maps:get(RGId, Acc, 0) - Used)}
+    end, Outstanding, UsedThis).
 
-    case Type of
-        T2 when T2 =:= offline; T2 =:= converged ->
-            chf_offline:terminate_request(Imsi, #{
-                session_id    => SessionId,
-                rating_groups => [#{rating_group => RGId,
-                                    used_units   => TotalUsed}
-                                  || #{rating_group := RGId,
-                                       used_units   := TotalUsed} <- AnnotatedRGs]
-            });
-        online -> ok
-    end,
-
-    %% Mark session as terminated in DB.
-    Terminated = Session#charging_session{
-        state      = terminated,
-        used_units = FinalUsed,
-        updated_at = erlang:system_time(millisecond)
-    },
-    chf_db:session_store(Terminated),
-    ok.
+merge_add(A, B) ->
+    maps:fold(fun(K, V, Acc) -> Acc#{K => maps:get(K, Acc, 0) + V} end, A, B).
