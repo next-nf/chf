@@ -32,9 +32,12 @@
 -define(CCR_UPDATE,     2).
 -define(CCR_TERMINATE,  3).
 
--define(DIAMETER_SUCCESS,          2001).
--define(DIAMETER_UNABLE_TO_COMPLY, 5012).
--define(DIAMETER_USER_UNKNOWN,     5030).
+-define(DIAMETER_SUCCESS,              2001).
+-define(DIAMETER_UNABLE_TO_COMPLY,     5012).
+-define(DIAMETER_USER_UNKNOWN,         5030).
+-define(DIAMETER_END_USER_SERVICE_DENIED, 4010).
+-define(DIAMETER_CREDIT_LIMIT_REACHED,    4012).
+-define(DIAMETER_UNKNOWN_SESSION_ID,      5002).
 
 %%====================================================================
 %% CT callbacks
@@ -46,7 +49,10 @@ all() ->
      ccr_initial_core_error,
      ccr_update_success,
      ccr_terminate_success,
-     ccr_unknown_error].
+     ccr_unknown_error,
+     ccr_initial_insufficient_balance,
+     ccr_update_unknown_session,
+     ccr_update_session_terminated].
 
 init_per_suite(Config) ->
     Config.
@@ -203,3 +209,23 @@ ccr_unknown_error(_Config) ->
     ?assertMatch({reply, #diameter_ro_CCA{
         'Result-Code' = ?DIAMETER_UNABLE_TO_COMPLY
     }}, Result).
+
+ccr_initial_insufficient_balance(_Config) ->
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) -> {error, insufficient_balance} end),
+    SubId = make_sub_id_imsi(<<"001010123456789">>),
+    CCR = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 100, 0)]),
+    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_CREDIT_LIMIT_REACHED}},
+                 call_handler(CCR)).
+
+ccr_update_unknown_session(_Config) ->
+    meck:expect(chf_core, session_update, fun(_, _) -> {error, not_found} end),
+    CCR = make_ccr(<<"s">>, ?CCR_UPDATE, [], [make_mscc(1, 100, 0)]),
+    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_UNKNOWN_SESSION_ID}},
+                 call_handler(CCR)).
+
+ccr_update_session_terminated(_Config) ->
+    meck:expect(chf_core, session_update, fun(_, _) -> {error, session_terminated} end),
+    CCR = make_ccr(<<"s">>, ?CCR_UPDATE, [], [make_mscc(1, 100, 0)]),
+    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_UNKNOWN_SESSION_ID}},
+                 call_handler(CCR)).
