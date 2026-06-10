@@ -32,7 +32,9 @@ all() ->
      update_session_success,
      update_session_not_found,
      release_session_success,
-     release_session_not_found].
+     release_session_not_found,
+     create_insufficient_balance_403,
+     update_large_body_413].
 
 init_per_suite(Config) ->
     %% Seed atom table so JSON decode works with known keys.
@@ -160,6 +162,27 @@ release_session_not_found(Config) ->
         "/nchf-convergedcharging/v3/chargingdata/nosuchref/release", Body),
 
     ?assertEqual(404, Status).
+
+create_insufficient_balance_403(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) -> {error, insufficient_balance} end),
+    Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>}},
+    {Status, _H, RespBody} = post_json(ConnPid,
+        "/nchf-convergedcharging/v3/chargingdata", Body),
+    ?assertEqual(403, Status),
+    ?assertEqual(nomatch, binary:match(RespBody, <<"insufficient_balance">>)).
+
+update_large_body_413(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{}} end),
+    Big = binary:copy(<<"x">>, 2 * 1024 * 1024),
+    Json = <<"{\"pad\":\"", Big/binary, "\"}">>,
+    Headers = [{<<"content-type">>, <<"application/json">>}],
+    StreamRef = gun:post(ConnPid,
+        "/nchf-convergedcharging/v3/chargingdata/ref/update", Headers, Json),
+    {response, _, Status, _} = gun:await(ConnPid, StreamRef),
+    ?assertEqual(413, Status).
 
 %%====================================================================
 %% Internal helpers
