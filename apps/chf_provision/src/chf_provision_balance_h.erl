@@ -110,7 +110,7 @@ from_json(Req, State) ->
 %%====================================================================
 
 handle_put(Fields, Req, #state{account_id = AccountId} = State) ->
-    case maps:find(total, Fields) of
+    case maps:find(<<"total">>, Fields) of
         {ok, NewTotal} when is_integer(NewTotal), NewTotal >= 0 ->
             Result = chf_db:balance_set_total(AccountId, NewTotal),
             respond_with_balance(Result, Req, State);
@@ -125,7 +125,7 @@ handle_put(Fields, Req, #state{account_id = AccountId} = State) ->
 %%====================================================================
 
 handle_patch(Fields, Req, #state{account_id = AccountId} = State) ->
-    case maps:find(credit, Fields) of
+    case maps:find(<<"credit">>, Fields) of
         {ok, Amount} when is_integer(Amount) ->
             Result = apply_delta(AccountId, Amount),
             respond_with_balance(Result, Req, State);
@@ -164,7 +164,7 @@ decode_body(<<>>) ->
     {error, <<"empty request body">>};
 decode_body(Bin) ->
     try
-        {Map, _, _} = chf_provision_json:decode(Bin),
+        Map = chf_provision_json:decode(Bin),
         {ok, Map}
     catch
         _:_ -> {error, <<"invalid JSON">>}

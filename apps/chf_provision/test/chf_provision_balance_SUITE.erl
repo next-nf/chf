@@ -85,8 +85,8 @@ put_sets_absolute_total(Config) ->
     {Status, Body} = put_req(ConnPid, "/api/v1/subscribers/001/balance",
                              #{<<"total">> => 5000}),
     ?assertEqual(200, Status),
-    {Decoded, _, _} = chf_provision_json:decode(Body),
-    ?assertEqual(5000, maps:get(total, Decoded)).
+    Decoded = chf_provision_json:decode(Body),
+    ?assertEqual(5000, maps:get(<<"total">>, Decoded)).
 
 put_below_reserved_409(Config) ->
     ConnPid = ?config(conn, Config),

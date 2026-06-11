@@ -23,40 +23,22 @@
 -include_lib("chf_db/include/chf_db.hrl").
 
 -export([decode/1, encode/1]).
--export([ensure_atoms/0]).
 -export([encode_subscriber/1, encode_balance/1]).
-
-%%====================================================================
-%% Atom seeding — must exist before binary_to_existing_atom is called.
-%%====================================================================
-
-%% @doc Force atom creation so binary_to_existing_atom/2 works for known keys.
--spec ensure_atoms() -> ok.
-ensure_atoms() ->
-    _ = [imsi, msisdn, account_id, status, rating_groups, quota, priority,
-         total, reserved, available, amount, credit, error, message, active,
-         suspended, terminated, created_at, updated_at],
-    ok.
 
 %%====================================================================
 %% Decode
 %%====================================================================
 
-%% @doc Decode a JSON binary, converting known keys to atoms.
--spec decode(binary()) -> {term(), binary(), term()}.
+%% @doc Decode a JSON binary to an Erlang term with binary object keys.
+%%
+%% Keys are never atomised: provisioning payloads and 3GPP map structures may
+%% carry arbitrary identifiers, and atomising them risks mixed atom/binary key
+%% maps and atom-table growth. The native json:decode/1 builds the map in a
+%% single pass. Internal vocabularies (e.g. rating-group quota/priority) are
+%% converted explicitly and in one pass below.
+-spec decode(binary()) -> term().
 decode(Bin) ->
-    json:decode(Bin, [], #{
-        object_start  => fun(_Acc) -> [] end,
-        object_push   => fun(Key, Value, Acc) ->
-            AtomKey = try binary_to_existing_atom(Key, utf8)
-                      catch error:badarg -> Key
-                      end,
-            [{AtomKey, Value} | Acc]
-        end,
-        object_finish => fun(Acc, OldAcc) ->
-            {maps:from_list(Acc), OldAcc}
-        end
-    }).
+    json:decode(Bin).
 
 %%====================================================================
 %% Encode
