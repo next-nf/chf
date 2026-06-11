@@ -16,6 +16,14 @@
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 %% chf_db.hrl — Record definitions for Next-CHF database layer
+%%
+%% NOTE: these are classic records, deliberately, and must stay classic.
+%% They are Mnesia table records, and Mnesia rejects OTP-29 native records
+%% ({aborted, {bad_type, ...}}) because a native record is a distinct datatype,
+%% not the plain tuple Mnesia's storage/match/record_info machinery requires.
+%% The org "prefer native records" convention therefore does not apply here.
+%% (Native records ARE used for non-persisted, module-local state — see the
+%% #state{} records in the chf_api handlers.)
 
 -ifndef(CHF_DB_HRL).
 -define(CHF_DB_HRL, true).
