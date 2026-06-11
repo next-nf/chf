@@ -174,7 +174,7 @@ read_json_body(Req) ->
             {error, 400, <<"Bad Request">>, <<"Empty request body">>, Req2};
         {ok, Bin, Req2} ->
             try
-                {Map, _, _} = chf_api_json:decode(Bin),
+                Map = chf_api_json:decode(Bin),
                 {ok, Map, Req2}
             catch
                 _:_ ->
@@ -185,11 +185,11 @@ read_json_body(Req) ->
 %% Extract IMSI from subscriberIdentifier.sUPI ("imsi-<digits>").
 %% Returns {ok, binary()} | {error, binary()}.
 extract_imsi(Body) ->
-    case maps:find(subscriberIdentifier, Body) of
+    case maps:find(<<"subscriberIdentifier">>, Body) of
         error ->
             {error, <<"Missing required field: subscriberIdentifier">>};
         {ok, SubId} when is_map(SubId) ->
-            case maps:find(sUPI, SubId) of
+            case maps:find(<<"sUPI">>, SubId) of
                 error ->
                     {error, <<"Missing sUPI in subscriberIdentifier">>};
                 {ok, Supi} ->
@@ -209,15 +209,15 @@ strip_imsi_prefix(Other)                     -> Other.
 %% Parse multipleUnitUsage into internal rating_groups list:
 %%   [#{rating_group => integer(), requested_units => integer(), used_units => integer()}]
 extract_rating_groups(Body) ->
-    MUUs = maps:get(multipleUnitUsage, Body, []),
+    MUUs = maps:get(<<"multipleUnitUsage">>, Body, []),
     lists:map(fun parse_muu/1, MUUs).
 
 parse_muu(MUU) when is_map(MUU) ->
-    RG       = maps:get(ratingGroup, MUU, 0),
-    ReqUnit  = maps:get(requestedUnit, MUU, #{}),
-    UsedList = maps:get(usedUnitContainer, MUU, []),
+    RG       = maps:get(<<"ratingGroup">>, MUU, 0),
+    ReqUnit  = maps:get(<<"requestedUnit">>, MUU, #{}),
+    UsedList = maps:get(<<"usedUnitContainer">>, MUU, []),
     Requested = case ReqUnit of
-        RU when is_map(RU) -> maps:get(totalVolume, RU, 0);
+        RU when is_map(RU) -> maps:get(<<"totalVolume">>, RU, 0);
         _ -> 0
     end,
     Used = sum_used_units(UsedList),
@@ -230,7 +230,7 @@ parse_muu(_) ->
 %% Sum totalVolume across all usedUnitContainer entries.
 sum_used_units(List) when is_list(List) ->
     lists:foldl(fun(UUC, Acc) when is_map(UUC) ->
-        Acc + to_integer(maps:get(totalVolume, UUC, 0));
+        Acc + to_integer(maps:get(<<"totalVolume">>, UUC, 0));
                    (_, Acc) -> Acc
                 end, 0, List);
 sum_used_units(_) -> 0.
