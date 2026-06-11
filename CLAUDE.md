@@ -10,7 +10,7 @@ rebar3 release
 _build/default/rel/next-chf/bin/next-chf foreground
 ```
 
-OTP 28.4+ is required. rebar3 is the build system. The `chf_diameter` app uses the `rebar3_diameter_compiler` plugin (configured in `apps/chf_diameter/rebar.config`). The top-level `rebar.config` has an override to suppress `warnings_as_errors` for generated diameter code.
+OTP 29+ is required (`{minimum_otp_vsn, "29"}`). rebar3 is the build system. The `chf_diameter` app's Diameter codecs (`diameter_*.erl` in `src/`, `.hrl` in `include/`) are generated from the `.dia` files in `dia/` with OTP's own `diameter_make` and **checked into the repo** — the third-party `rebar3_diameter_compiler` plugin was removed because it does not load on OTP 29. The top-level `rebar.config` has an override to suppress `warnings_as_errors` for the generated diameter code.
 
 ## Architecture
 
