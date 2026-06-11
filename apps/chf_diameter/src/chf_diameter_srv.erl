@@ -64,12 +64,23 @@ init([]) ->
         {'Acct-Application-Id', [3]},   %% Rf
         {restrict_connections, false},
         {string_decode, false},
-        {application, [{alias,      ro},
-                       {dictionary, diameter_3gpp_ts32_299_ro},
-                       {module,     chf_diameter_gy}]},
-        {application, [{alias,      rf},
-                       {dictionary, diameter_3gpp_ts32_299_rf},
-                       {module,     chf_diameter_rf}]}
+        %% RFC 6733 base as the common application (App-Id 0): use the RFC 6733
+        %% base rather than OTP's RFC 3588 default so the stack may emit 5xxx
+        %% answers (nf-architecture diameter.md §1).
+        {application, [{alias,      common},
+                       {dictionary, diameter_gen_base_rfc6733},
+                       {module,     chf_diameter_base}]},
+        %% request_errors=answer: the stack answers decode/protocol errors
+        %% itself, so handle_request/3 only ever sees cleanly decoded requests
+        %% (nf-architecture diameter.md §2).
+        {application, [{alias,         ro},
+                       {dictionary,    diameter_3gpp_ts32_299_ro},
+                       {module,        chf_diameter_gy},
+                       {request_errors, answer}]},
+        {application, [{alias,         rf},
+                       {dictionary,    diameter_3gpp_ts32_299_rf},
+                       {module,        chf_diameter_rf},
+                       {request_errors, answer}]}
     ],
 
     ok = diameter:start_service(?SERVICE, SvcOpts),
