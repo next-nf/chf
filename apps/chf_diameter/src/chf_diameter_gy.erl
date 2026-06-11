@@ -44,9 +44,12 @@
          handle_request/3]).
 
 %% DIAMETER result codes
--define(DIAMETER_SUCCESS,              2001).
--define(DIAMETER_UNABLE_TO_COMPLY,     5012).
--define(DIAMETER_USER_UNKNOWN,         5030).
+-define(DIAMETER_SUCCESS,                 2001).
+-define(DIAMETER_UNABLE_TO_COMPLY,        5012).
+-define(DIAMETER_USER_UNKNOWN,            5030).
+-define(DIAMETER_END_USER_SERVICE_DENIED, 4010).
+-define(DIAMETER_CREDIT_LIMIT_REACHED,    4012).
+-define(DIAMETER_UNKNOWN_SESSION_ID,      5002).
 
 %% CC-Request-Type values
 -define(CCR_INITIAL,    1).
@@ -199,7 +202,9 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
 %% Error code mapping
 %%====================================================================
 
-error_code(subscriber_not_found)  -> ?DIAMETER_USER_UNKNOWN;
-error_code(subscriber_suspended)  -> ?DIAMETER_UNABLE_TO_COMPLY;
-error_code(not_found)             -> ?DIAMETER_USER_UNKNOWN;
-error_code(_)                     -> ?DIAMETER_UNABLE_TO_COMPLY.
+error_code(insufficient_balance) -> ?DIAMETER_CREDIT_LIMIT_REACHED;
+error_code(subscriber_suspended) -> ?DIAMETER_END_USER_SERVICE_DENIED;
+error_code(subscriber_not_found) -> ?DIAMETER_USER_UNKNOWN;
+error_code(not_found)            -> ?DIAMETER_UNKNOWN_SESSION_ID;
+error_code(session_terminated)   -> ?DIAMETER_UNKNOWN_SESSION_ID;
+error_code(_)                    -> ?DIAMETER_UNABLE_TO_COMPLY.

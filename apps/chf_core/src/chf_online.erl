@@ -72,9 +72,9 @@ update_request(Imsi, RatingGroups) ->
 
 %% @doc Handle a session-terminate charging request.
 %%
-%% RatingGroups :: [#{rating_group  => non_neg_integer(),
-%%                    used_units    => integer(),
-%%                    granted_units => integer()}]   %% granted_units provided by caller
+%% RatingGroups :: [#{rating_group   => non_neg_integer(),
+%%                    used_units     => integer(),   %% final delta usage
+%%                    reserved_units => integer()}]   %% outstanding reservation
 -spec terminate_request(Imsi :: binary(), RatingGroups :: [map()]) ->
     ok | {error, term()}.
 terminate_request(Imsi, RatingGroups) ->
@@ -82,16 +82,11 @@ terminate_request(Imsi, RatingGroups) ->
         {ok, Sub} ->
             AccountId = Sub#subscriber.account_id,
             lists:foreach(fun(RG) ->
-                Used    = maps:get(used_units,    RG, 0),
-                Granted = maps:get(granted_units, RG, 0),
-                Unused  = max(0, Granted - Used),
-                %% Commit actually used units.
-                _ = chf_db:balance_commit(AccountId, Used),
-                %% Refund whatever was reserved but not used.
-                if Unused > 0 ->
-                    _ = chf_db:balance_refund(AccountId, Unused);
-                   true -> ok
-                end
+                Used     = maps:get(used_units,     RG, 0),
+                Reserved = maps:get(reserved_units, RG, 0),
+                Refund   = max(0, Reserved - Used),
+                if Used   > 0 -> _ = chf_db:balance_commit(AccountId, Used); true -> ok end,
+                if Refund > 0 -> _ = chf_db:balance_refund(AccountId, Refund); true -> ok end
             end, RatingGroups),
             ok;
         {error, not_found} ->

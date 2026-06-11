@@ -49,8 +49,8 @@ init(Req, State) ->
 %% POST to the collection URI — Create (Initial) charging data.
 handle(<<"POST">>, Req, [] = State) ->
     case read_json_body(Req) of
-        {error, Title, Detail, Req2} ->
-            Req3 = chf_api_error:reply_error(400, Title, Detail, Req2),
+        {error, Status, Title, Detail, Req2} ->
+            Req3 = chf_api_error:reply_error(Status, Title, Detail, Req2),
             {ok, Req3, State};
         {ok, Body, Req2} ->
             handle_create(Body, Req2, State)
@@ -60,8 +60,8 @@ handle(<<"POST">>, Req, [] = State) ->
 handle(<<"POST">>, Req, [update] = State) ->
     Ref = cowboy_req:binding(offlineChargingDataRef, Req),
     case read_json_body(Req) of
-        {error, Title, Detail, Req2} ->
-            Req3 = chf_api_error:reply_error(400, Title, Detail, Req2),
+        {error, Status, Title, Detail, Req2} ->
+            Req3 = chf_api_error:reply_error(Status, Title, Detail, Req2),
             {ok, Req3, State};
         {ok, Body, Req2} ->
             handle_update(Ref, Body, Req2, State)
@@ -71,8 +71,8 @@ handle(<<"POST">>, Req, [update] = State) ->
 handle(<<"POST">>, Req, [release] = State) ->
     Ref = cowboy_req:binding(offlineChargingDataRef, Req),
     case read_json_body(Req) of
-        {error, Title, Detail, Req2} ->
-            Req3 = chf_api_error:reply_error(400, Title, Detail, Req2),
+        {error, Status, Title, Detail, Req2} ->
+            Req3 = chf_api_error:reply_error(Status, Title, Detail, Req2),
             {ok, Req3, State};
         {ok, Body, Req2} ->
             handle_release(Ref, Body, Req2, State)
@@ -104,16 +104,14 @@ handle_create(Body, Req, State) ->
                     imsi       => Imsi,
                     type       => offline}) of
                 {error, Reason} ->
-                    Req2 = chf_api_error:reply_error(503,
-                        <<"Service Unavailable">>,
-                        format_error(Reason), Req),
+                    {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
+                    Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
                     {ok, Req2, State};
                 {ok, _Pid} ->
                     case chf_core:session_initial(Ref, #{rating_groups => RatingGroups}) of
                         {error, Reason} ->
-                            Req2 = chf_api_error:reply_error(503,
-                                <<"Service Unavailable">>,
-                                format_error(Reason), Req),
+                            {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
+                            Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
                             {ok, Req2, State};
                         {ok, GrantedMap} ->
                             Location = <<"/nchf-offlineonlycharging/v1/offlinechargingdata/", Ref/binary>>,
@@ -134,16 +132,9 @@ handle_create(Body, Req, State) ->
 handle_update(Ref, Body, Req, State) ->
     RatingGroups = extract_rating_groups(Body),
     case chf_core:session_update(Ref, #{rating_groups => RatingGroups}) of
-        {error, not_found} ->
-            Req2 = chf_api_error:reply_error(404,
-                <<"Not Found">>,
-                <<"No active charging session with the given offlineChargingDataRef">>,
-                Req),
-            {ok, Req2, State};
         {error, Reason} ->
-            Req2 = chf_api_error:reply_error(503,
-                <<"Service Unavailable">>,
-                format_error(Reason), Req),
+            {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
+            Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
             {ok, Req2, State};
         {ok, GrantedMap} ->
             ResponseBody = build_response(GrantedMap, RatingGroups),
@@ -160,16 +151,9 @@ handle_update(Ref, Body, Req, State) ->
 handle_release(Ref, Body, Req, State) ->
     RatingGroups = extract_rating_groups(Body),
     case chf_core:session_terminate(Ref, #{rating_groups => RatingGroups}) of
-        {error, not_found} ->
-            Req2 = chf_api_error:reply_error(404,
-                <<"Not Found">>,
-                <<"No active charging session with the given offlineChargingDataRef">>,
-                Req),
-            {ok, Req2, State};
         {error, Reason} ->
-            Req2 = chf_api_error:reply_error(503,
-                <<"Service Unavailable">>,
-                format_error(Reason), Req),
+            {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
+            Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
             {ok, Req2, State};
         ok ->
             Req2 = cowboy_req:reply(204, #{}, <<>>, Req),
@@ -181,21 +165,21 @@ handle_release(Ref, Body, Req, State) ->
 %%====================================================================
 
 %% Read the request body and JSON-decode it.
-%% Returns {ok, Map, Req} | {error, Title, Detail, Req}.
+%% Returns {ok, Map, Req} | {error, Status, Title, Detail, Req}.
 read_json_body(Req) ->
-    case cowboy_req:read_body(Req) of
+    case chf_api_util:read_body(Req) of
+        {error, too_large, Req2} ->
+            {error, 413, <<"Payload Too Large">>, <<"Request body exceeds limit">>, Req2};
         {ok, <<>>, Req2} ->
-            {error, <<"Bad Request">>, <<"Empty request body">>, Req2};
+            {error, 400, <<"Bad Request">>, <<"Empty request body">>, Req2};
         {ok, Bin, Req2} ->
             try
                 {Map, _, _} = chf_api_json:decode(Bin),
                 {ok, Map, Req2}
             catch
                 _:_ ->
-                    {error, <<"Bad Request">>, <<"Invalid JSON">>, Req2}
-            end;
-        {error, Reason} ->
-            {error, <<"Bad Request">>, format_error(Reason), Req}
+                    {error, 400, <<"Bad Request">>, <<"Invalid JSON">>, Req2}
+            end
     end.
 
 %% Extract IMSI from subscriberIdentifier.sUPI ("imsi-<digits>").
@@ -261,8 +245,7 @@ build_response(GrantedMap, RatingGroups) ->
     chf_api_json:encode(#{<<"multipleUnitInformation">> => MUI}).
 
 %% Generate a unique offlineChargingDataRef.
-generate_ref() ->
-    integer_to_binary(erlang:unique_integer([positive, monotonic])).
+generate_ref() -> chf_api_util:generate_ref().
 
 to_integer(V) when is_integer(V) -> V;
 to_integer(V) when is_float(V)   -> round(V);
@@ -272,5 +255,3 @@ to_integer(V) when is_binary(V)  ->
     end;
 to_integer(_) -> 0.
 
-format_error(Err) when is_binary(Err) -> Err;
-format_error(Err) -> iolist_to_binary(io_lib:format("~p", [Err])).

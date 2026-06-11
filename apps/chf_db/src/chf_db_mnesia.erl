@@ -32,12 +32,14 @@
     balance_reserve/2,
     balance_commit/2,
     balance_refund/2,
+    balance_set_total/2,
     cdr_write/1,
     cdr_list/1,
     session_store/1,
     session_lookup/1,
     session_delete/1,
-    session_list_active/0
+    session_list_active/0,
+    session_transaction/2
 ]).
 
 %%====================================================================
@@ -83,18 +85,21 @@ ensure_table(Name, Fields, StorageType, ExtraOpts) ->
 %%====================================================================
 
 -spec subscriber_create(#subscriber{}) -> ok | {error, term()}.
-subscriber_create(#subscriber{} = Sub) ->
-    F = fun() -> mnesia:write(Sub) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+subscriber_create(#subscriber{imsi = Imsi} = Sub) ->
+    F = fun() ->
+        case mnesia:read(subscriber, Imsi, write) of
+            [_] -> mnesia:abort(already_exists);
+            []  -> mnesia:write(Sub)
+        end
+    end,
+    case activity(F) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec subscriber_lookup(Imsi :: binary()) -> {ok, #subscriber{}} | {error, not_found}.
 subscriber_lookup(Imsi) ->
-    F = fun() -> mnesia:read(subscriber, Imsi) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:read(subscriber, Imsi) end) of
         [#subscriber{} = Sub] -> {ok, Sub};
         []                    -> {error, not_found};
         {error, _} = Err      -> Err
@@ -102,20 +107,16 @@ subscriber_lookup(Imsi) ->
 
 -spec subscriber_update(#subscriber{}) -> ok | {error, term()}.
 subscriber_update(#subscriber{} = Sub) ->
-    F = fun() -> mnesia:write(Sub) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:write(Sub) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec subscriber_delete(Imsi :: binary()) -> ok | {error, term()}.
 subscriber_delete(Imsi) ->
-    F = fun() -> mnesia:delete({subscriber, Imsi}) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:delete({subscriber, Imsi}) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 %%====================================================================
@@ -124,8 +125,7 @@ subscriber_delete(Imsi) ->
 
 -spec balance_get(AccountId :: binary()) -> {ok, #balance{}} | {error, not_found}.
 balance_get(AccountId) ->
-    F = fun() -> mnesia:read(balance, AccountId) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:read(balance, AccountId) end) of
         [#balance{} = B] -> {ok, B};
         []               -> {error, not_found};
         {error, _} = Err -> Err
@@ -135,18 +135,14 @@ balance_get(AccountId) ->
     {ok, #balance{}} | {error, term()}.
 balance_topup(AccountId, Amount) ->
     F = fun() ->
-        B0 = case mnesia:read(balance, AccountId) of
+        B0 = case mnesia:read(balance, AccountId, write) of
             [Existing] -> Existing;
-            []         ->
-                #balance{account_id = AccountId,
-                         total      = 0,
-                         reserved   = 0,
-                         available  = 0}
+            []         -> #balance{account_id = AccountId,
+                                   total = 0, reserved = 0, available = 0}
         end,
-        B1 = B0#balance{
-            total     = B0#balance.total     + Amount,
-            available = B0#balance.available + Amount
-        },
+        NewTotal = B0#balance.total + Amount,
+        B1 = B0#balance{total     = NewTotal,
+                        available = NewTotal - B0#balance.reserved},
         ok = mnesia:write(B1),
         B1
     end,
@@ -156,16 +152,15 @@ balance_topup(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_reserve(AccountId, Amount) ->
     F = fun() ->
-        case mnesia:read(balance, AccountId) of
+        case mnesia:read(balance, AccountId, write) of
             [] ->
                 mnesia:abort(not_found);
             [#balance{available = Avail}] when Avail < Amount ->
                 mnesia:abort(insufficient_balance);
             [#balance{} = B0] ->
-                B1 = B0#balance{
-                    available = B0#balance.available - Amount,
-                    reserved  = B0#balance.reserved  + Amount
-                },
+                NewReserved = B0#balance.reserved + Amount,
+                B1 = B0#balance{reserved  = NewReserved,
+                                available = B0#balance.total - NewReserved},
                 ok = mnesia:write(B1),
                 B1
         end
@@ -176,16 +171,17 @@ balance_reserve(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_commit(AccountId, Amount) ->
     F = fun() ->
-        case mnesia:read(balance, AccountId) of
+        case mnesia:read(balance, AccountId, write) of
             [] ->
                 mnesia:abort(not_found);
             [#balance{} = B0] ->
-                NewReserved = max(0, B0#balance.reserved - Amount),
-                NewTotal    = B0#balance.total - Amount,
-                B1 = B0#balance{
-                    total    = NewTotal,
-                    reserved = NewReserved
-                },
+                %% Never commit more than is reserved.
+                Commit      = min(max(0, Amount), B0#balance.reserved),
+                NewReserved = B0#balance.reserved - Commit,
+                NewTotal    = B0#balance.total    - Commit,
+                B1 = B0#balance{total     = NewTotal,
+                                reserved  = NewReserved,
+                                available = NewTotal - NewReserved},
                 ok = mnesia:write(B1),
                 B1
         end
@@ -196,16 +192,37 @@ balance_commit(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_refund(AccountId, Amount) ->
     F = fun() ->
-        case mnesia:read(balance, AccountId) of
+        case mnesia:read(balance, AccountId, write) of
             [] ->
                 mnesia:abort(not_found);
             [#balance{} = B0] ->
-                NewReserved  = max(0, B0#balance.reserved  - Amount),
-                NewAvailable = B0#balance.available + Amount,
-                B1 = B0#balance{
-                    reserved  = NewReserved,
-                    available = NewAvailable
-                },
+                %% Never refund more than is reserved.
+                Refund      = min(max(0, Amount), B0#balance.reserved),
+                NewReserved = B0#balance.reserved - Refund,
+                B1 = B0#balance{reserved  = NewReserved,
+                                available = B0#balance.total - NewReserved},
+                ok = mnesia:write(B1),
+                B1
+        end
+    end,
+    run_balance_txn(F).
+
+-spec balance_set_total(AccountId :: binary(), NewTotal :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+balance_set_total(AccountId, NewTotal) ->
+    F = fun() ->
+        Reserved = case mnesia:read(balance, AccountId, write) of
+            [#balance{reserved = R}] -> R;
+            []                       -> 0
+        end,
+        case NewTotal < Reserved of
+            true ->
+                mnesia:abort(total_below_reserved);
+            false ->
+                B1 = #balance{account_id = AccountId,
+                              total      = NewTotal,
+                              reserved   = Reserved,
+                              available  = NewTotal - Reserved},
                 ok = mnesia:write(B1),
                 B1
         end
@@ -217,11 +234,20 @@ balance_refund(AccountId, Amount) ->
 %%--------------------------------------------------------------------
 -spec run_balance_txn(fun()) -> {ok, #balance{}} | {error, term()}.
 run_balance_txn(F) ->
-    case mnesia:activity(transaction, F) of
-        #balance{} = B          -> {ok, B};
-        {error, _} = Err        -> Err;
-        {aborted, Reason}       -> {error, Reason};
-        Aborted                 -> {error, Aborted}
+    case activity(F) of
+        #balance{} = B   -> {ok, B};
+        {error, _} = Err -> Err
+    end.
+
+%% Run a Mnesia activity, converting an abort exit into {error, Reason}.
+%% mnesia:activity/2 returns the fun's value on success and EXITS with
+%% {aborted, Reason} on abort, so callers must catch the exit here.
+-spec activity(fun()) -> term() | {error, term()}.
+activity(F) ->
+    try mnesia:activity(transaction, F)
+    catch
+        exit:{aborted, {chf_session_abort, Reason}} -> {error, Reason};
+        exit:{aborted, Reason}                      -> {error, Reason}
     end.
 
 %%====================================================================
@@ -230,11 +256,9 @@ run_balance_txn(F) ->
 
 -spec cdr_write(#cdr{}) -> ok | {error, term()}.
 cdr_write(#cdr{} = Cdr) ->
-    F = fun() -> mnesia:write(Cdr) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:write(Cdr) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]}.
@@ -251,11 +275,9 @@ cdr_list(Filters) ->
         timestamp    = '_',
         metadata     = '_'
     },
-    F = fun() -> mnesia:match_object(Pattern) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:match_object(Pattern) end) of
         Cdrs when is_list(Cdrs) -> {ok, Cdrs};
-        {error, _} = Err        -> Err;
-        _Other                  -> {ok, []}
+        {error, _} = Err        -> Err
     end.
 
 %%====================================================================
@@ -264,18 +286,15 @@ cdr_list(Filters) ->
 
 -spec session_store(#charging_session{}) -> ok | {error, term()}.
 session_store(#charging_session{} = Session) ->
-    F = fun() -> mnesia:write(Session) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:write(Session) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
 -spec session_lookup(SessionId :: binary()) ->
     {ok, #charging_session{}} | {error, not_found}.
 session_lookup(SessionId) ->
-    F = fun() -> mnesia:read(charging_session, SessionId) end,
-    case mnesia:activity(transaction, F) of
+    case activity(fun() -> mnesia:read(charging_session, SessionId) end) of
         [#charging_session{} = S] -> {ok, S};
         []                        -> {error, not_found};
         {error, _} = Err          -> Err
@@ -283,28 +302,35 @@ session_lookup(SessionId) ->
 
 -spec session_delete(SessionId :: binary()) -> ok | {error, term()}.
 session_delete(SessionId) ->
-    F = fun() -> mnesia:delete({charging_session, SessionId}) end,
-    case mnesia:activity(transaction, F) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Aborted -> {error, Aborted}
+    case activity(fun() -> mnesia:delete({charging_session, SessionId}) end) of
+        ok               -> ok;
+        {error, _} = Err -> Err
     end.
 
--spec session_list_active() -> {ok, [#charging_session{}]}.
+-spec session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
 session_list_active() ->
-    Pattern = #charging_session{
-        session_id    = '_',
-        imsi          = '_',
-        type          = '_',
-        state         = active,
-        granted_units = '_',
-        used_units    = '_',
-        created_at    = '_',
-        updated_at    = '_'
-    },
-    F = fun() -> mnesia:match_object(Pattern) end,
-    case mnesia:activity(transaction, F) of
-        Sessions when is_list(Sessions) -> {ok, Sessions};
-        {error, _} = Err                -> Err;
-        _Other                          -> {ok, []}
+    Pattern = #charging_session{state = active, _ = '_'},
+    case activity(fun() -> mnesia:match_object(Pattern) end) of
+        L when is_list(L)  -> {ok, L};
+        {error, _} = Err   -> Err
     end.
+
+-spec session_transaction(SessionId :: binary(), Fun :: fun()) ->
+    term() | {error, term()}.
+session_transaction(SessionId, Fun) ->
+    F = fun() ->
+        Current = case mnesia:read(charging_session, SessionId, write) of
+            [#charging_session{} = S] -> S;
+            []                        -> undefined
+        end,
+        case Fun(Current) of
+            {commit, #charging_session{} = New, Result} ->
+                ok = mnesia:write(New),
+                Result;
+            {result, Result} ->
+                Result;
+            {abort, Reason} ->
+                mnesia:abort({chf_session_abort, Reason})
+        end
+    end,
+    activity(F).

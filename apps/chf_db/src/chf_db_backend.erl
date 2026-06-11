@@ -62,6 +62,10 @@
 %% Return Amount from reserved back to available (e.g. over-estimated grant).
 -callback balance_refund(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
+%% Set the absolute total balance; available is re-derived as total - reserved.
+%% Must abort with total_below_reserved if NewTotal < current reserved.
+-callback balance_set_total(AccountId :: binary(), NewTotal :: integer()) -> {ok, #balance{}} | {error, term()}.
+
 %% ------------------------------------------------------------------
 %% CDR operations
 %% ------------------------------------------------------------------
@@ -86,4 +90,11 @@
 -callback session_delete(SessionId :: binary()) -> ok | {error, term()}.
 
 %% List all active charging sessions.
--callback session_list_active() -> {ok, [#charging_session{}]}.
+-callback session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
+
+%% Run Fun against the current session record (or undefined) inside a single
+%% backend transaction holding a write lock on the session id. Fun returns:
+%%   {commit, NewSession, Result} — write NewSession, return Result
+%%   {result, Result}             — write nothing, return Result
+%%   {abort, Reason}              — roll back, return {error, Reason}
+-callback session_transaction(SessionId :: binary(), Fun :: fun()) -> term() | {error, term()}.

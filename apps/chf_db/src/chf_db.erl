@@ -39,6 +39,7 @@
     balance_reserve/2,
     balance_commit/2,
     balance_refund/2,
+    balance_set_total/2,
     %% CDR
     cdr_write/1,
     cdr_list/1,
@@ -47,7 +48,8 @@
     session_store/1,
     session_lookup/1,
     session_delete/1,
-    session_list_active/0
+    session_list_active/0,
+    session_transaction/2
 ]).
 
 -define(PT_KEY, {chf_db, backend}).
@@ -111,6 +113,11 @@ balance_commit(AccountId, Amount) ->
 balance_refund(AccountId, Amount) ->
     (backend()):balance_refund(AccountId, Amount).
 
+-spec balance_set_total(AccountId :: binary(), NewTotal :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+balance_set_total(AccountId, NewTotal) ->
+    (backend()):balance_set_total(AccountId, NewTotal).
+
 %%====================================================================
 %% CDR operations
 %%====================================================================
@@ -145,9 +152,14 @@ session_lookup(SessionId) ->
 session_delete(SessionId) ->
     (backend()):session_delete(SessionId).
 
--spec session_list_active() -> {ok, [#charging_session{}]}.
+-spec session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
 session_list_active() ->
     (backend()):session_list_active().
+
+-spec session_transaction(SessionId :: binary(), Fun :: fun()) ->
+    term() | {error, term()}.
+session_transaction(SessionId, Fun) ->
+    (backend()):session_transaction(SessionId, Fun).
 
 %%====================================================================
 %% Internal helpers

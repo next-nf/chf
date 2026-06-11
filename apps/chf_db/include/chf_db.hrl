@@ -63,7 +63,7 @@
     imsi          :: binary(),
     type          :: online | offline | converged,
     state         :: initial | active | terminated,
-    granted_units :: #{non_neg_integer() => integer()},   %% RatingGroup => granted
+    granted_units :: #{non_neg_integer() => integer()},   %% RatingGroup => outstanding reserved
     used_units    :: #{non_neg_integer() => integer()},   %% RatingGroup => used
     created_at    :: integer(),
     updated_at    :: integer()

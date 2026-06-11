@@ -139,72 +139,42 @@ build_mscc_response(GrantedMap) ->
 
 %% @doc Extract used-unit data from an Rf ACR's Service-Information list.
 %%
-%% This is a best-effort extraction; we look for Used-Service-Unit in
-%% the MSCC embedded within Service-Information.  Returns a list of maps
-%% #{rating_group => RGId, used_units => Total}.
+%% PS offline charging carries volumes in
+%% Service-Information -> PS-Information -> Traffic-Data-Volumes
+%% (Accounting-Input-Octets + Accounting-Output-Octets). We sum those
+%% into a single total under rating group 0 (the Rf ACR has no per-RG
+%% MSCC).
+%%
+%% Returns [] when no volumes are present, or
+%% [#{rating_group => 0, used_units => Total}].
 -spec extract_used_units_rf(list()) -> [map()].
 extract_used_units_rf([]) ->
     [];
 extract_used_units_rf(ServiceInfoList) ->
-    %% Service-Information is a grouped AVP; its structure varies by
-    %% service type.  We attempt to pull MSCC out of it when present.
-    lists:flatmap(fun extract_si_rf/1, ServiceInfoList).
-
-extract_si_rf(SI) when is_tuple(SI) ->
-    %% The Service-Information grouped AVP record may contain a
-    %% 'Multiple-Services-Credit-Control' field for Rf.
-    case catch element(1, SI) of
-        'diameter_rf_Service-Information' ->
-            MSCCList = get_record_field(SI, 'Multiple-Services-Credit-Control', []),
-            extract_mscc_rf(MSCCList);
-        _ ->
-            []
-    end;
-extract_si_rf(_) ->
-    [].
-
-extract_mscc_rf([]) ->
-    [];
-extract_mscc_rf(MSCCList) ->
-    lists:filtermap(fun extract_one_mscc_rf/1, MSCCList).
-
-extract_one_mscc_rf(#'diameter_rf_Multiple-Services-Credit-Control'{
-        'Rating-Group'      = RGList,
-        'Used-Service-Unit' = USUList}) ->
-    case RGList of
-        [RGId | _] ->
-            UsedTotal = extract_usu_total_rf(USUList),
-            {true, #{rating_group => RGId, used_units => UsedTotal}};
-        [] ->
-            false
-    end;
-extract_one_mscc_rf(_) ->
-    false.
-
-extract_usu_total_rf([]) ->
-    0;
-extract_usu_total_rf(USUList) ->
-    lists:foldl(fun(#'diameter_rf_Used-Service-Unit'{'CC-Total-Octets' = [V | _]}, Acc) ->
-                        Acc + V;
-                   (#'diameter_rf_Used-Service-Unit'{'CC-Total-Octets' = []}, Acc) ->
-                        Acc;
-                   (_, Acc) ->
-                        Acc
-                end, 0, USUList).
-
-%% Safe record field accessor (avoids crashes on unexpected record shapes).
-get_record_field(Rec, Field, Default) ->
-    try
-        Fields = element(1, Rec),
-        RecInfo = erlang:get(Fields),
-        case RecInfo of
-            undefined -> Default;
-            _ ->
-                Index = lists:keyfind(Field, 1, RecInfo),
-                case Index of
-                    {Field, Pos} -> element(Pos, Rec);
-                    false        -> Default
-                end
-        end
-    catch _:_ -> Default
+    Total = lists:foldl(fun(SI, Acc) -> Acc + si_volume(SI) end, 0, ServiceInfoList),
+    case Total of
+        0 -> [];
+        _ -> [#{rating_group => 0, used_units => Total}]
     end.
+
+si_volume(#'diameter_rf_Service-Information'{'PS-Information' = PSList})
+  when is_list(PSList) ->
+    lists:foldl(fun ps_volume/2, 0, PSList);
+si_volume(_) ->
+    0.
+
+ps_volume(#'diameter_rf_PS-Information'{'Traffic-Data-Volumes' = TDVList}, Acc)
+  when is_list(TDVList) ->
+    Acc + lists:foldl(fun tdv_volume/2, 0, TDVList);
+ps_volume(_, Acc) ->
+    Acc.
+
+tdv_volume(#'diameter_rf_Traffic-Data-Volumes'{
+              'Accounting-Input-Octets'  = In,
+              'Accounting-Output-Octets' = Out}, Acc) ->
+    Acc + first_int(In) + first_int(Out);
+tdv_volume(_, Acc) ->
+    Acc.
+
+first_int([V | _]) when is_integer(V) -> V;
+first_int(_)                          -> 0.

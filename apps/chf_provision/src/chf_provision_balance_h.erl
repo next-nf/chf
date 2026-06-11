@@ -109,16 +109,10 @@ from_json(Req, State) ->
 %% PUT — set absolute balance value
 %%====================================================================
 
-handle_put(Fields, Req, #state{account_id = AccountId, balance = OldBal} = State) ->
+handle_put(Fields, Req, #state{account_id = AccountId} = State) ->
     case maps:find(total, Fields) of
         {ok, NewTotal} when is_integer(NewTotal), NewTotal >= 0 ->
-            %% Calculate delta from current total (or 0 if no balance yet)
-            CurrentTotal = case OldBal of
-                               undefined -> 0;
-                               #balance{total = T} -> T
-                           end,
-            Delta = NewTotal - CurrentTotal,
-            Result = apply_delta(AccountId, Delta),
+            Result = chf_db:balance_set_total(AccountId, NewTotal),
             respond_with_balance(Result, Req, State);
         {ok, _} ->
             reply_error(400, <<"total must be a non-negative integer">>, Req, State);
@@ -161,6 +155,8 @@ respond_with_balance({ok, Balance}, Req, State) ->
     {true, Req2, State#state{balance = Balance}};
 respond_with_balance({error, insufficient_balance}, Req, State) ->
     reply_error(409, <<"insufficient balance">>, Req, State);
+respond_with_balance({error, total_below_reserved}, Req, State) ->
+    reply_error(409, <<"total cannot be set below reserved balance">>, Req, State);
 respond_with_balance({error, Err}, Req, State) ->
     reply_error(500, format_error(Err), Req, State).
 
