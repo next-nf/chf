@@ -48,7 +48,15 @@ No ServiceIdentifier or per-service rating in v1. MSCC (Multiple-Services-Credit
 
 ### JSON handling
 
-Uses Erlang's built-in `json` module (`json:decode/3` with custom callbacks to convert keys to existing atoms, `json:encode/1` for output). Each app with JSON handling has its own codec module with an `ensure_atoms/0` function that seeds the atom table.
+Uses Erlang's built-in `json` module: `json:decode/1` for input (the native
+single-pass decoder; object keys are kept as **binaries**, never atomised) and
+`json:encode/1` for output. Keys are not converted to atoms because 3GPP map
+structures can carry arbitrary identifiers — atomising them would risk mixed
+atom/binary key maps and atom-table growth. Each app with JSON handling has a
+thin codec module (`chf_api_json`, `chf_provision_json`) wrapping decode/encode;
+conversion from binary-keyed maps to internal representations (records, the
+atom-keyed rating-group `quota`/`priority` config) happens explicitly and in a
+single pass at the handler layer.
 
 ### DIAMETER: server-side
 
@@ -107,4 +115,6 @@ All in `config/sys.config`. Key settings:
 - No parse_transforms
 - No unnecessary abstractions or speculative features
 - Balance amounts always in micro-units (integers, no floats)
+- Decode JSON to binary-keyed maps (`json:decode/1`); never atomise inbound JSON keys
+- Convert/transform decoded structures in a single pass — no repeated full traversals of the same list or map
 - Mnesia `disc_copies` for persistent tables, transactions for atomicity
