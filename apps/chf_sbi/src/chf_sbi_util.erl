@@ -15,8 +15,8 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_api_util.erl — Shared utilities for CHF REST API handlers.
--module(chf_api_util).
+%% chf_sbi_util.erl — Shared utilities for CHF REST API handlers.
+-module(chf_sbi_util).
 
 -export([read_body/1, generate_ref/0]).
 

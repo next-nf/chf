@@ -15,7 +15,7 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_api_converged_h.erl — Cowboy handler for Nchf_ConvergedCharging.
+%% chf_sbi_converged_h.erl — Cowboy handler for Nchf_ConvergedCharging.
 %%
 %% Routes (per TS 32.291 §6.1):
 %%
@@ -29,7 +29,7 @@
 %%        — Final / release charging request, returns 204
 %%
 %% The chargingDataRef doubles as our internal session_id.
--module(chf_api_converged_h).
+-module(chf_sbi_converged_h).
 -behaviour(cowboy_handler).
 
 -export([init/2]).
@@ -50,7 +50,7 @@ init(Req, State) ->
 handle(<<"POST">>, Req, [] = State) ->
     case read_json_body(Req) of
         {error, Status, Title, Detail, Req2} ->
-            Req3 = chf_api_error:reply_error(Status, Title, Detail, Req2),
+            Req3 = chf_sbi_error:reply_error(Status, Title, Detail, Req2),
             {ok, Req3, State};
         {ok, Body, Req2} ->
             handle_create(Body, Req2, State)
@@ -61,7 +61,7 @@ handle(<<"POST">>, Req, [update] = State) ->
     Ref = cowboy_req:binding(chargingDataRef, Req),
     case read_json_body(Req) of
         {error, Status, Title, Detail, Req2} ->
-            Req3 = chf_api_error:reply_error(Status, Title, Detail, Req2),
+            Req3 = chf_sbi_error:reply_error(Status, Title, Detail, Req2),
             {ok, Req3, State};
         {ok, Body, Req2} ->
             handle_update(Ref, Body, Req2, State)
@@ -72,7 +72,7 @@ handle(<<"POST">>, Req, [release] = State) ->
     Ref = cowboy_req:binding(chargingDataRef, Req),
     case read_json_body(Req) of
         {error, Status, Title, Detail, Req2} ->
-            Req3 = chf_api_error:reply_error(Status, Title, Detail, Req2),
+            Req3 = chf_sbi_error:reply_error(Status, Title, Detail, Req2),
             {ok, Req3, State};
         {ok, Body, Req2} ->
             handle_release(Ref, Body, Req2, State)
@@ -80,7 +80,7 @@ handle(<<"POST">>, Req, [release] = State) ->
 
 %% Wrong method.
 handle(_Method, Req, State) ->
-    Req2 = chf_api_error:reply_error(405,
+    Req2 = chf_sbi_error:reply_error(405,
         <<"Method Not Allowed">>,
         <<"Only POST is supported on this resource">>,
         Req),
@@ -93,7 +93,7 @@ handle(_Method, Req, State) ->
 handle_create(Body, Req, State) ->
     case extract_imsi(Body) of
         {error, Reason} ->
-            Req2 = chf_api_error:reply_error(400,
+            Req2 = chf_sbi_error:reply_error(400,
                 <<"Bad Request">>, Reason, Req),
             {ok, Req2, State};
         {ok, Imsi} ->
@@ -104,14 +104,14 @@ handle_create(Body, Req, State) ->
                     imsi       => Imsi,
                     type       => converged}) of
                 {error, Reason} ->
-                    {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
-                    Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
+                    {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
+                    Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
                     {ok, Req2, State};
                 {ok, _Pid} ->
                     case chf_core:session_initial(Ref, #{rating_groups => RatingGroups}) of
                         {error, Reason} ->
-                            {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
-                            Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
+                            {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
+                            Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
                             {ok, Req2, State};
                         {ok, GrantedMap} ->
                             Location = <<"/nchf-convergedcharging/v3/chargingdata/", Ref/binary>>,
@@ -133,8 +133,8 @@ handle_update(Ref, Body, Req, State) ->
     RatingGroups = extract_rating_groups(Body),
     case chf_core:session_update(Ref, #{rating_groups => RatingGroups}) of
         {error, Reason} ->
-            {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
-            Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
+            {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
+            Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
             {ok, Req2, State};
         {ok, GrantedMap} ->
             ResponseBody = build_response(GrantedMap, RatingGroups),
@@ -152,8 +152,8 @@ handle_release(Ref, Body, Req, State) ->
     RatingGroups = extract_rating_groups(Body),
     case chf_core:session_terminate(Ref, #{rating_groups => RatingGroups}) of
         {error, Reason} ->
-            {Status, Title, Detail} = chf_api_error:reason_to_problem(Reason),
-            Req2 = chf_api_error:reply_error(Status, Title, Detail, Req),
+            {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
+            Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
             {ok, Req2, State};
         ok ->
             Req2 = cowboy_req:reply(204, #{}, <<>>, Req),
@@ -167,14 +167,14 @@ handle_release(Ref, Body, Req, State) ->
 %% Read the request body and JSON-decode it.
 %% Returns {ok, Map, Req} | {error, Status, Title, Detail, Req}.
 read_json_body(Req) ->
-    case chf_api_util:read_body(Req) of
+    case chf_sbi_util:read_body(Req) of
         {error, too_large, Req2} ->
             {error, 413, <<"Payload Too Large">>, <<"Request body exceeds limit">>, Req2};
         {ok, <<>>, Req2} ->
             {error, 400, <<"Bad Request">>, <<"Empty request body">>, Req2};
         {ok, Bin, Req2} ->
             try
-                Map = chf_api_json:decode(Bin),
+                Map = chf_sbi_json:decode(Bin),
                 {ok, Map, Req2}
             catch
                 _:_ ->
@@ -251,10 +251,10 @@ build_response(GrantedMap, RatingGroups) ->
           <<"resultCode">>   => 2001,
           <<"validityTime">> => 3600}
     end, RatingGroups),
-    chf_api_json:encode(#{<<"multipleUnitInformation">> => MUI}).
+    chf_sbi_json:encode(#{<<"multipleUnitInformation">> => MUI}).
 
 %% Generate a unique chargingDataRef.
-generate_ref() -> chf_api_util:generate_ref().
+generate_ref() -> chf_sbi_util:generate_ref().
 
 to_integer(V) when is_integer(V) -> V;
 to_integer(V) when is_float(V)   -> round(V);

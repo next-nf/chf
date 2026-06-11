@@ -15,7 +15,7 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
--module(chf_provision_sup).
+-module(chf_sbi_sup).
 -behaviour(supervisor).
 
 -export([start_link/0]).

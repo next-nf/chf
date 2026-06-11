@@ -15,7 +15,7 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
--module(chf_provision_balance_SUITE).
+-module(chf_api_balance_SUITE).
 -compile(export_all).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -30,7 +30,7 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(cowboy),
     {ok, _} = application:ensure_all_started(gun),
     Dispatch = cowboy_router:compile([{'_', [
-        {"/api/v1/subscribers/:imsi/balance", chf_provision_balance_h, []}
+        {"/api/v1/subscribers/:imsi/balance", chf_api_balance_h, []}
     ]}]),
     {ok, _} = cowboy:start_clear(prov_bal_listener, [{port, 0}],
         #{env => #{dispatch => Dispatch}}),
@@ -85,7 +85,7 @@ put_sets_absolute_total(Config) ->
     {Status, Body} = put_req(ConnPid, "/api/v1/subscribers/001/balance",
                              #{<<"total">> => 5000}),
     ?assertEqual(200, Status),
-    Decoded = chf_provision_json:decode(Body),
+    Decoded = chf_api_json:decode(Body),
     ?assertEqual(5000, maps:get(<<"total">>, Decoded)).
 
 put_below_reserved_409(Config) ->

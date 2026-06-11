@@ -17,8 +17,8 @@
 
 {application, chf_api, [
     {vsn, semver},
-    {description, "Next-CHF 5G Nchf REST APIs"},
-    {applications, [kernel, stdlib, cowboy, chf_core]},
+    {description, "Next-CHF Provisioning REST API"},
+    {applications, [kernel, stdlib, cowboy, chf_db]},
     {mod, {chf_api_app, []}},
     {registered, []}
 ]}.

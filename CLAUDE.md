@@ -21,12 +21,12 @@ Erlang umbrella application with 7 sub-apps under `apps/`:
 | `chf_db` | Pluggable DB layer (behaviour + Mnesia backend) | - | - |
 | `chf_core` | Charging engine: session orchestration, online/offline logic | chf_db | - |
 | `chf_diameter` | DIAMETER Gy (Ro) + Rf server interfaces for 4G | chf_core, diameter | TCP :3868 |
-| `chf_api` | 5G Nchf_ConvergedCharging + OfflineOnlyCharging REST APIs (TS 32.291) | chf_core, cowboy | HTTP :8443 |
-| `chf_provision` | Provisioning REST API (subscribers, balances) | chf_db, cowboy | HTTP :8080 |
+| `chf_sbi` | 5G Nchf_ConvergedCharging + OfflineOnlyCharging REST APIs (TS 32.291) | chf_core, cowboy | HTTP :8443 |
+| `chf_api` | Provisioning REST API (subscribers, balances) | chf_db, cowboy | HTTP :8080 |
 | `chf_web` | Web management UI + Prometheus metrics | chf_core, chf_db, cowboy | HTTP :8081 |
 | `chf` | Top-level app: config, startup logging | all above | - |
 
-Startup order: chf_db -> chf_core -> chf_diameter -> chf_api -> chf_provision -> chf_web -> chf.
+Startup order: chf_db -> chf_core -> chf_diameter -> chf_sbi -> chf_api -> chf_web -> chf.
 
 ## Key design decisions
 
@@ -53,7 +53,7 @@ single-pass decoder; object keys are kept as **binaries**, never atomised) and
 `json:encode/1` for output. Keys are not converted to atoms because 3GPP map
 structures can carry arbitrary identifiers — atomising them would risk mixed
 atom/binary key maps and atom-table growth. Each app with JSON handling has a
-thin codec module (`chf_api_json`, `chf_provision_json`) wrapping decode/encode;
+thin codec module (`chf_sbi_json`, `chf_api_json`) wrapping decode/encode;
 conversion from binary-keyed maps to internal representations (records, the
 atom-keyed rating-group `quota`/`priority` config) happens explicitly and in a
 single pass at the handler layer.
@@ -64,8 +64,8 @@ The CHF is a DIAMETER **server** (receives CCR/ACR, sends CCA/ACA). This is the 
 
 ### Cowboy handlers
 
-- `chf_provision` uses `cowboy_rest` behaviour (subscriber: full CRUD with content negotiation; balance: GET/PUT/PATCH on single resource)
-- `chf_api` uses plain `cowboy_handler` (3GPP APIs are POST-only RPC-style, not RESTful)
+- `chf_api` uses `cowboy_rest` behaviour (subscriber: full CRUD with content negotiation; balance: GET/PUT/PATCH on single resource)
+- `chf_sbi` uses plain `cowboy_handler` (3GPP APIs are POST-only RPC-style, not RESTful)
 - `chf_web` uses plain `cowboy_handler` (simple GET-only JSON APIs for the dashboard)
 
 ### Web UI
@@ -104,8 +104,8 @@ All in `config/sys.config`. Key settings:
 - `{chf_db, [{backend, chf_db_mnesia}]}`
 - `{chf_core, [{session_idle_timeout, 300000}, {sweep_interval, 60000}]}`
 - `{chf_diameter, [{origin_host, "..."}, {origin_realm, "..."}, {listen, [{tcp, IP, Port}]}]}`
-- `{chf_api, [{port, 8443}, {ip, {127,0,0,1}}]}`
-- `{chf_provision, [{port, 8080}, {ip, {127,0,0,1}}]}`
+- `{chf_sbi, [{port, 8443}, {ip, {127,0,0,1}}]}`
+- `{chf_api, [{port, 8080}, {ip, {127,0,0,1}}]}`
 - `{chf_web, [{port, 8081}, {ip, {127,0,0,1}}]}`
 
 ## Conventions

@@ -15,8 +15,8 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_provision_json_SUITE.erl — Codec regression: JSON decodes to binary keys.
--module(chf_provision_json_SUITE).
+%% chf_sbi_json_SUITE.erl — Codec regression tests: JSON decodes to binary keys.
+-module(chf_sbi_json_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
@@ -34,26 +34,24 @@ all() ->
      encode_decode_roundtrip].
 
 decode_object_keys_are_binary(_Config) ->
-    Decoded = chf_provision_json:decode(
-        <<"{\"imsi\":\"001\",\"account_id\":\"acc-1\"}">>),
-    ?assertEqual(#{<<"imsi">> => <<"001">>,
-                   <<"account_id">> => <<"acc-1">>}, Decoded).
+    Decoded = chf_sbi_json:decode(<<"{\"ratingGroup\":5,\"totalVolume\":100}">>),
+    ?assertEqual(#{<<"ratingGroup">> => 5, <<"totalVolume">> => 100}, Decoded).
 
-%% The json module never atomises keys regardless of atom-table state; these
-%% keys ("status", "total") are plausible collision candidates and must still
-%% decode to binary keys, never atoms.
+%% The crux regression: keys that DO match an existing atom ("error", "status"
+%% exist in every running VM) must still decode to binaries, never atoms, so a
+%% map can never end up with mixed atom/binary keys.
 decode_atom_colliding_key_stays_binary(_Config) ->
-    Decoded = chf_provision_json:decode(<<"{\"status\":1,\"total\":2}">>),
+    Decoded = chf_sbi_json:decode(<<"{\"error\":1,\"status\":2}">>),
     ?assert(is_map(Decoded)),
     ?assert(lists:all(fun is_binary/1, maps:keys(Decoded))),
-    ?assertEqual(#{<<"status">> => 1, <<"total">> => 2}, Decoded).
+    ?assertEqual(#{<<"error">> => 1, <<"status">> => 2}, Decoded).
 
 decode_nested_keys_are_binary(_Config) ->
-    Decoded = chf_provision_json:decode(
-        <<"{\"rating_groups\":{\"1\":{\"quota\":5000}}}">>),
-    ?assertEqual(#{<<"rating_groups">> =>
-                       #{<<"1">> => #{<<"quota">> => 5000}}}, Decoded).
+    Decoded = chf_sbi_json:decode(
+        <<"{\"subscriberIdentifier\":{\"sUPI\":\"imsi-001\"}}">>),
+    ?assertEqual(#{<<"subscriberIdentifier">> =>
+                      #{<<"sUPI">> => <<"imsi-001">>}}, Decoded).
 
 encode_decode_roundtrip(_Config) ->
     Term = #{<<"a">> => 1, <<"b">> => [#{<<"c">> => 2}]},
-    ?assertEqual(Term, chf_provision_json:decode(chf_provision_json:encode(Term))).
+    ?assertEqual(Term, chf_sbi_json:decode(chf_sbi_json:encode(Term))).
