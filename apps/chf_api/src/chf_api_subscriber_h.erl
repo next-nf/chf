@@ -15,14 +15,14 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_provision_subscriber_h.erl — Cowboy REST handler for subscriber resources.
+%% chf_api_subscriber_h.erl — Cowboy REST handler for subscriber resources.
 %%
 %% Routes:
 %%   GET    /api/v1/subscribers/:imsi  — fetch subscriber
 %%   POST   /api/v1/subscribers        — create subscriber
 %%   PUT    /api/v1/subscribers/:imsi  — update subscriber
 %%   DELETE /api/v1/subscribers/:imsi  — delete subscriber
--module(chf_provision_subscriber_h).
+-module(chf_api_subscriber_h).
 
 -include_lib("chf_db/include/chf_db.hrl").
 
@@ -76,10 +76,10 @@ resource_exists(Req, #state{imsi = Imsi} = State) ->
 %%====================================================================
 
 to_json(Req, #state{subscriber = Sub} = State) when Sub =/= undefined ->
-    Body = chf_provision_json:encode_subscriber(Sub),
+    Body = chf_api_json:encode_subscriber(Sub),
     {Body, Req, State};
 to_json(Req, State) ->
-    Body = chf_provision_json:encode(#{<<"error">> => <<"not found">>}),
+    Body = chf_api_json:encode(#{<<"error">> => <<"not found">>}),
     {Body, Req, State}.
 
 %%====================================================================
@@ -132,7 +132,7 @@ handle_create(Fields, Req, State) ->
             case chf_db:subscriber_create(Sub) of
                 ok ->
                     _ = chf_db:balance_topup(AccountId, 0),
-                    Body = chf_provision_json:encode_subscriber(Sub),
+                    Body = chf_api_json:encode_subscriber(Sub),
                     Req2 = cowboy_req:set_resp_body(Body, Req),
                     {{created, <<"/api/v1/subscribers/", Imsi/binary>>}, Req2, State};
                 {error, already_exists} ->
@@ -161,7 +161,7 @@ handle_update(Fields, Req, #state{subscriber = Existing} = State) ->
     },
     case chf_db:subscriber_update(Updated) of
         ok ->
-            Body = chf_provision_json:encode_subscriber(Updated),
+            Body = chf_api_json:encode_subscriber(Updated),
             Req2 = cowboy_req:set_resp_body(Body, Req),
             {true, Req2, State#state{subscriber = Updated}};
         {error, Err} ->
@@ -191,7 +191,7 @@ decode_body(<<>>) ->
     {error, <<"empty request body">>};
 decode_body(Bin) ->
     try
-        Map = chf_provision_json:decode(Bin),
+        Map = chf_api_json:decode(Bin),
         {ok, Map}
     catch
         _:_ -> {error, <<"invalid JSON">>}
@@ -236,7 +236,7 @@ parse_status(terminated)       -> terminated;
 parse_status(_)                -> active.
 
 reply_error(Status, Msg, Req, State) ->
-    Body = chf_provision_json:encode(#{<<"error">> => Msg}),
+    Body = chf_api_json:encode(#{<<"error">> => Msg}),
     Req2 = cowboy_req:set_resp_header(<<"content-type">>, <<"application/json">>, Req),
     Req3 = cowboy_req:set_resp_body(Body, Req2),
     {stop, cowboy_req:reply(Status, Req3), State}.

@@ -25,9 +25,9 @@
 start(_StartType, _StartArgs) ->
     ?LOG_INFO("Next-CHF starting..."),
     ?LOG_INFO("  Provisioning API: ~s",
-              [listener_info(chf_provision, port, 8080)]),
+              [listener_info(chf_api, port, 8080)]),
     ?LOG_INFO("  5G CHF API:       ~s",
-              [listener_info(chf_api, port, 8443)]),
+              [listener_info(chf_sbi, port, 8443)]),
     ?LOG_INFO("  Web UI:           ~s",
               [listener_info(chf_web, port, 8081)]),
     ?LOG_INFO("  DIAMETER:         ~s",

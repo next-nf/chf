@@ -15,11 +15,11 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_api_error.erl — RFC 7807 Problem Details helper for the 5G CHF REST API.
+%% chf_sbi_error.erl — RFC 7807 Problem Details helper for the 5G CHF REST API.
 %%
 %% Builds and sends application/problem+json responses as required by
 %% 3GPP TS 32.291 and RFC 7807.
--module(chf_api_error).
+-module(chf_sbi_error).
 
 -export([problem_details/3, reply_error/4, reason_to_problem/1]).
 
@@ -32,7 +32,7 @@
 %% problem_details(Status, Title, Detail) -> binary()
 -spec problem_details(non_neg_integer(), binary(), binary()) -> binary().
 problem_details(Status, Title, Detail) ->
-    chf_api_json:encode(#{
+    chf_sbi_json:encode(#{
         <<"type">>   => <<"about:blank">>,
         <<"title">>  => Title,
         <<"status">> => Status,

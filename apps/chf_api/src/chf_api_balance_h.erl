@@ -15,13 +15,13 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_provision_balance_h.erl — Cowboy REST handler for balance resources.
+%% chf_api_balance_h.erl — Cowboy REST handler for balance resources.
 %%
 %% Routes:
 %%   GET   /api/v1/subscribers/:imsi/balance — read balance
 %%   PATCH /api/v1/subscribers/:imsi/balance — adjust balance (credit field)
 %%   PUT   /api/v1/subscribers/:imsi/balance — set absolute balance
--module(chf_provision_balance_h).
+-module(chf_api_balance_h).
 
 -include_lib("chf_db/include/chf_db.hrl").
 
@@ -76,11 +76,11 @@ resource_exists(Req, #state{imsi = Imsi} = State) ->
 %%====================================================================
 
 to_json(Req, #state{balance = Balance} = State) when Balance =/= undefined ->
-    Body = chf_provision_json:encode_balance(Balance),
+    Body = chf_api_json:encode_balance(Balance),
     {Body, Req, State};
 to_json(Req, #state{account_id = AccountId} = State) ->
     %% No balance record yet — return zeroes
-    Body = chf_provision_json:encode(#{
+    Body = chf_api_json:encode(#{
         <<"account_id">> => AccountId,
         <<"total">> => 0,
         <<"reserved">> => 0,
@@ -150,7 +150,7 @@ apply_delta(AccountId, Amount) ->
     end.
 
 respond_with_balance({ok, Balance}, Req, State) ->
-    Body = chf_provision_json:encode_balance(Balance),
+    Body = chf_api_json:encode_balance(Balance),
     Req2 = cowboy_req:set_resp_body(Body, Req),
     {true, Req2, State#state{balance = Balance}};
 respond_with_balance({error, insufficient_balance}, Req, State) ->
@@ -164,14 +164,14 @@ decode_body(<<>>) ->
     {error, <<"empty request body">>};
 decode_body(Bin) ->
     try
-        Map = chf_provision_json:decode(Bin),
+        Map = chf_api_json:decode(Bin),
         {ok, Map}
     catch
         _:_ -> {error, <<"invalid JSON">>}
     end.
 
 reply_error(Status, Msg, Req, State) ->
-    Body = chf_provision_json:encode(#{<<"error">> => Msg}),
+    Body = chf_api_json:encode(#{<<"error">> => Msg}),
     Req2 = cowboy_req:set_resp_header(<<"content-type">>, <<"application/json">>, Req),
     Req3 = cowboy_req:set_resp_body(Body, Req2),
     {stop, cowboy_req:reply(Status, Req3), State}.

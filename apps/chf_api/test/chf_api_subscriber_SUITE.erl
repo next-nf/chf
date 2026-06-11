@@ -15,7 +15,7 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
--module(chf_provision_subscriber_SUITE).
+-module(chf_api_subscriber_SUITE).
 -compile(export_all).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -31,8 +31,8 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(cowboy),
     {ok, _} = application:ensure_all_started(gun),
     Dispatch = cowboy_router:compile([{'_', [
-        {"/api/v1/subscribers", chf_provision_subscriber_h, []},
-        {"/api/v1/subscribers/:imsi", chf_provision_subscriber_h, []}
+        {"/api/v1/subscribers", chf_api_subscriber_h, []},
+        {"/api/v1/subscribers/:imsi", chf_api_subscriber_h, []}
     ]}]),
     {ok, _} = cowboy:start_clear(prov_sub_listener, [{port, 0}],
         #{env => #{dispatch => Dispatch}}),
