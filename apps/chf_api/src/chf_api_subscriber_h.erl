@@ -35,10 +35,11 @@
          to_json/2,
          from_json/2]).
 
--record(state, {
-    imsi       :: binary() | undefined,
-    subscriber :: #subscriber{} | undefined
-}).
+%% OTP-29 native record (module-local handler state).
+-record #state{
+    imsi       = undefined :: binary() | undefined,
+    subscriber = undefined :: #subscriber{} | undefined
+}.
 
 %%====================================================================
 %% REST callbacks
