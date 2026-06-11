@@ -118,7 +118,7 @@ handle_create(Fields, Req, State) ->
         {error, Reason} ->
             reply_error(400, Reason, Req, State);
         {ok, Imsi, Msisdn, AccountId} ->
-            RatingGroups = parse_rating_groups(maps:get(rating_groups, Fields, #{})),
+            RatingGroups = parse_rating_groups(maps:get(<<"rating_groups">>, Fields, #{})),
             Now = erlang:system_time(millisecond),
             Sub = #subscriber{
                 imsi          = Imsi,
@@ -151,9 +151,9 @@ handle_update(_Fields, Req, #state{subscriber = undefined} = State) ->
 handle_update(Fields, Req, #state{subscriber = Existing} = State) ->
     Now = erlang:system_time(millisecond),
     Updated = Existing#subscriber{
-        msisdn        = maps:get(msisdn, Fields, Existing#subscriber.msisdn),
-        status        = parse_status(maps:get(status, Fields, Existing#subscriber.status)),
-        rating_groups = case maps:find(rating_groups, Fields) of
+        msisdn        = maps:get(<<"msisdn">>, Fields, Existing#subscriber.msisdn),
+        status        = parse_status(maps:get(<<"status">>, Fields, Existing#subscriber.status)),
+        rating_groups = case maps:find(<<"rating_groups">>, Fields) of
                             {ok, RG} -> parse_rating_groups(RG);
                             error    -> Existing#subscriber.rating_groups
                         end,
@@ -173,7 +173,7 @@ handle_update(Fields, Req, #state{subscriber = Existing} = State) ->
 %%====================================================================
 
 validate_create_fields(Fields) ->
-    case {maps:find(imsi, Fields), maps:find(msisdn, Fields), maps:find(account_id, Fields)} of
+    case {maps:find(<<"imsi">>, Fields), maps:find(<<"msisdn">>, Fields), maps:find(<<"account_id">>, Fields)} of
         {{ok, Imsi}, {ok, Msisdn}, {ok, AccountId}}
           when is_binary(Imsi), is_binary(Msisdn), is_binary(AccountId) ->
             {ok, Imsi, Msisdn, AccountId};
@@ -191,7 +191,7 @@ decode_body(<<>>) ->
     {error, <<"empty request body">>};
 decode_body(Bin) ->
     try
-        {Map, _, _} = chf_provision_json:decode(Bin),
+        Map = chf_provision_json:decode(Bin),
         {ok, Map}
     catch
         _:_ -> {error, <<"invalid JSON">>}

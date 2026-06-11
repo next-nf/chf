@@ -21,7 +21,6 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    chf_provision_json:ensure_atoms(),
     Port = application:get_env(chf_provision, port, 8080),
     Ip   = application:get_env(chf_provision, ip, {127,0,0,1}),
     Dispatch = cowboy_router:compile([

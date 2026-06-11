@@ -35,9 +35,6 @@ all() ->
      update_large_body_413].
 
 init_per_suite(Config) ->
-    %% Seed atom table so JSON decode works with known keys.
-    chf_api_json:ensure_atoms(),
-
     %% Start cowboy and ranch if not already running.
     {ok, _} = application:ensure_all_started(cowboy),
 
@@ -101,8 +98,8 @@ create_session_success(Config) ->
     Location = proplists:get_value(<<"location">>, RespHeaders),
     ?assertMatch(<<"/nchf-offlineonlycharging/v1/offlinechargingdata/", _/binary>>, Location),
 
-    {Decoded, _, _} = chf_api_json:decode(RespBody),
-    ?assertMatch(#{multipleUnitInformation := [_ | _]}, Decoded).
+    Decoded = chf_api_json:decode(RespBody),
+    ?assertMatch(#{<<"multipleUnitInformation">> := [_ | _]}, Decoded).
 
 update_session_success(Config) ->
     ConnPid = ?config(conn, Config),
@@ -116,8 +113,8 @@ update_session_success(Config) ->
         "/nchf-offlineonlycharging/v1/offlinechargingdata/ref456/update", Body),
 
     ?assertEqual(200, Status),
-    {Decoded, _, _} = chf_api_json:decode(RespBody),
-    ?assertMatch(#{multipleUnitInformation := [_ | _]}, Decoded).
+    Decoded = chf_api_json:decode(RespBody),
+    ?assertMatch(#{<<"multipleUnitInformation">> := [_ | _]}, Decoded).
 
 release_session_success(Config) ->
     ConnPid = ?config(conn, Config),

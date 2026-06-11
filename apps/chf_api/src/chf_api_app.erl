@@ -21,7 +21,6 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    chf_api_json:ensure_atoms(),
     Port = application:get_env(chf_api, port, 8443),
     Ip   = application:get_env(chf_api, ip, {127, 0, 0, 1}),
 

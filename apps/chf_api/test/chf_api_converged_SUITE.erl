@@ -37,9 +37,6 @@ all() ->
      update_large_body_413].
 
 init_per_suite(Config) ->
-    %% Seed atom table so JSON decode works with known keys.
-    chf_api_json:ensure_atoms(),
-
     %% Start cowboy and ranch if not already running.
     {ok, _} = application:ensure_all_started(cowboy),
 
@@ -103,8 +100,8 @@ create_session_success(Config) ->
     Location = proplists:get_value(<<"location">>, RespHeaders),
     ?assertMatch(<<"/nchf-convergedcharging/v3/chargingdata/", _/binary>>, Location),
 
-    {Decoded, _, _} = chf_api_json:decode(RespBody),
-    ?assertMatch(#{multipleUnitInformation := [_ | _]}, Decoded).
+    Decoded = chf_api_json:decode(RespBody),
+    ?assertMatch(#{<<"multipleUnitInformation">> := [_ | _]}, Decoded).
 
 create_session_missing_imsi(Config) ->
     ConnPid = ?config(conn, Config),
@@ -127,8 +124,8 @@ update_session_success(Config) ->
         "/nchf-convergedcharging/v3/chargingdata/ref123/update", Body),
 
     ?assertEqual(200, Status),
-    {Decoded, _, _} = chf_api_json:decode(RespBody),
-    ?assertMatch(#{multipleUnitInformation := [_ | _]}, Decoded).
+    Decoded = chf_api_json:decode(RespBody),
+    ?assertMatch(#{<<"multipleUnitInformation">> := [_ | _]}, Decoded).
 
 update_session_not_found(Config) ->
     ConnPid = ?config(conn, Config),
