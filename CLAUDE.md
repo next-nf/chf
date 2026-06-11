@@ -103,7 +103,6 @@ All in `config/sys.config`. Key settings:
 ## Conventions
 
 - License: AGPL-3.0-or-later. All new source files (.erl, .hrl, .app.src) must have the SPDX header and short AGPLv3 notice at the top (see any existing file for the template)
-- No Co-Authored-By lines in git commits
 - Sonnet agents for implementation, Opus for orchestration and review
 - No parse_transforms
 - No unnecessary abstractions or speculative features
