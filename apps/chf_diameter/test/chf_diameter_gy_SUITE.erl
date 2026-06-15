@@ -27,6 +27,11 @@
 -include_lib("diameter/include/diameter.hrl").
 -include_lib("chf_diameter/include/diameter_3gpp_ts32_299_ro.hrl").
 
+%% These are intentionally literal protocol constants, NOT the generated
+%% dictionary macros the production code uses. The test thus acts as an
+%% independent oracle: production derives these values from the dictionary,
+%% the test pins the actual on-wire integers, and they must agree. Replacing
+%% them with the generated macros would mask a wrong dictionary enum/value.
 -define(END_USER_IMSI,  1).
 -define(CCR_INITIAL,    1).
 -define(CCR_UPDATE,     2).

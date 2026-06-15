@@ -58,10 +58,11 @@ init([]) ->
     SvcOpts = [
         {'Origin-Host',    OriginHost},
         {'Origin-Realm',   OriginRealm},
-        {'Vendor-Id',      10415},
+        {'Vendor-Id',      diameter_3gpp_ts32_299_ro:vendor_id()},   %% 10415 (3GPP)
         {'Product-Name',   "Next-CHF"},
-        {'Auth-Application-Id', [4]},   %% Ro / Gy
-        {'Acct-Application-Id', [3]},   %% Rf
+        %% Application-Ids come from the generated dictionaries rather than literals.
+        {'Auth-Application-Id', [diameter_3gpp_ts32_299_ro:id()]},   %% Ro / Gy (4)
+        {'Acct-Application-Id', [diameter_3gpp_ts32_299_rf:id()]},   %% Rf (3)
         {restrict_connections, false},
         {string_decode, false},
         %% RFC 6733 base as the common application (App-Id 0): use the RFC 6733

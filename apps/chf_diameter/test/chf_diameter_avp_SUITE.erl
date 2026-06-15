@@ -25,6 +25,9 @@
 -include_lib("chf_diameter/include/diameter_3gpp_ts32_299_ro.hrl").
 -include_lib("chf_diameter/include/diameter_3gpp_ts32_299_rf.hrl").
 
+%% Intentionally literal protocol constants, NOT the generated dictionary
+%% macros production uses — see the note in chf_diameter_gy_SUITE. The test
+%% is an independent oracle on the actual Subscription-Id-Type values.
 -define(END_USER_E164, 0).
 -define(END_USER_IMSI, 1).
 

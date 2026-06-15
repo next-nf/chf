@@ -27,6 +27,9 @@
 -include_lib("diameter/include/diameter.hrl").
 -include_lib("chf_diameter/include/diameter_3gpp_ts32_299_rf.hrl").
 
+%% Intentionally literal protocol constants, NOT the generated dictionary
+%% macros production uses — see the note in chf_diameter_gy_SUITE. The test
+%% is an independent oracle on the actual on-wire integers.
 -define(ART_EVENT,   1).
 -define(ART_START,   2).
 -define(ART_INTERIM, 3).

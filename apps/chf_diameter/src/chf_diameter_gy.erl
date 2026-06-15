@@ -43,18 +43,10 @@
          handle_error/4,
          handle_request/3]).
 
-%% DIAMETER result codes
--define(DIAMETER_SUCCESS,                 2001).
--define(DIAMETER_UNABLE_TO_COMPLY,        5012).
--define(DIAMETER_USER_UNKNOWN,            5030).
--define(DIAMETER_END_USER_SERVICE_DENIED, 4010).
--define(DIAMETER_CREDIT_LIMIT_REACHED,    4012).
--define(DIAMETER_UNKNOWN_SESSION_ID,      5002).
-
-%% CC-Request-Type values
--define(CCR_INITIAL,    1).
--define(CCR_UPDATE,     2).
--define(CCR_TERMINATE,  3).
+%% Result-Code and CC-Request-Type constants come from the generated dictionary
+%% headers included above (diameter_gen_base_rfc6733.hrl for the RFC 6733 base
+%% codes, diameter_3gpp_ts32_299_ro.hrl for the RFC 4006 CC codes and the
+%% CC-Request-Type enum) — no hand-defined macros.
 
 %%====================================================================
 %% diameter application callbacks — server-side stubs
@@ -119,11 +111,11 @@ handle_request(#diameter_packet{msg = Msg}, _SvcName, _Peer) ->
 %% Per request-type dispatch
 %%====================================================================
 
-handle_ccr(?CCR_INITIAL, SessionId, Imsi, RatingGroups) ->
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, RatingGroups) ->
     case Imsi of
         undefined ->
             ?LOG_WARNING("Gy INITIAL: no IMSI in CCR session=~s", [SessionId]),
-            {error, ?DIAMETER_USER_UNKNOWN};
+            {error, ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN'};
         _ ->
             Info = #{session_id => SessionId,
                      imsi       => Imsi,
@@ -147,7 +139,7 @@ handle_ccr(?CCR_INITIAL, SessionId, Imsi, RatingGroups) ->
             end
     end;
 
-handle_ccr(?CCR_UPDATE, SessionId, _Imsi, RatingGroups) ->
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_UPDATE_REQUEST', SessionId, _Imsi, RatingGroups) ->
     ReqData = #{rating_groups => RatingGroups},
     case chf_core:session_update(SessionId, ReqData) of
         {ok, GrantedMap} ->
@@ -158,7 +150,7 @@ handle_ccr(?CCR_UPDATE, SessionId, _Imsi, RatingGroups) ->
             {error, error_code(Reason)}
     end;
 
-handle_ccr(?CCR_TERMINATE, SessionId, _Imsi, RatingGroups) ->
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_TERMINATION_REQUEST', SessionId, _Imsi, RatingGroups) ->
     ReqData = #{rating_groups => RatingGroups},
     case chf_core:session_terminate(SessionId, ReqData) of
         ok ->
@@ -172,7 +164,7 @@ handle_ccr(?CCR_TERMINATE, SessionId, _Imsi, RatingGroups) ->
 handle_ccr(ReqType, SessionId, _Imsi, _RatingGroups) ->
     ?LOG_WARNING("Gy: unknown CC-Request-Type=~w session=~s",
                  [ReqType, SessionId]),
-    {error, ?DIAMETER_UNABLE_TO_COMPLY}.
+    {error, ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'}.
 
 %%====================================================================
 %% CCA builder
@@ -182,7 +174,7 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
     {ResultCode, MSCCList} =
         case Result of
             {ok, GrantedMap} ->
-                {?DIAMETER_SUCCESS,
+                {?'DIAMETER_BASE_RESULT-CODE_SUCCESS',
                  chf_diameter_avp:build_mscc_response(GrantedMap)};
             {error, Code} ->
                 {Code, []}
@@ -192,7 +184,7 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
         'Result-Code'                    = ResultCode,
         'Origin-Host'                    = OriginHost,
         'Origin-Realm'                   = OriginRealm,
-        'Auth-Application-Id'            = 4,
+        'Auth-Application-Id'            = diameter_3gpp_ts32_299_ro:id(),
         'CC-Request-Type'                = ReqType,
         'CC-Request-Number'              = ReqNumber,
         'Multiple-Services-Credit-Control' = MSCCList
@@ -202,9 +194,9 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
 %% Error code mapping
 %%====================================================================
 
-error_code(insufficient_balance) -> ?DIAMETER_CREDIT_LIMIT_REACHED;
-error_code(subscriber_suspended) -> ?DIAMETER_END_USER_SERVICE_DENIED;
-error_code(subscriber_not_found) -> ?DIAMETER_USER_UNKNOWN;
-error_code(not_found)            -> ?DIAMETER_UNKNOWN_SESSION_ID;
-error_code(session_terminated)   -> ?DIAMETER_UNKNOWN_SESSION_ID;
-error_code(_)                    -> ?DIAMETER_UNABLE_TO_COMPLY.
+error_code(insufficient_balance) -> ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED';
+error_code(subscriber_suspended) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
+error_code(subscriber_not_found) -> ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN';
+error_code(not_found)            -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';
+error_code(session_terminated)   -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';
+error_code(_)                    -> ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'.

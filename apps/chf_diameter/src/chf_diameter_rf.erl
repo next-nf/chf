@@ -32,6 +32,11 @@
 -include_lib("diameter/include/diameter.hrl").
 -include_lib("diameter/include/diameter_gen_base_rfc6733.hrl").
 -include_lib("chf_diameter/include/diameter_3gpp_ts32_299_rf.hrl").
+%% The Rf dictionary does not itself surface the RFC 4006 USER_UNKNOWN (5030)
+%% Result-Code, so we include the inherited diameter_rfc4006_cc dictionary header
+%% for ?'RESULT-CODE_USER_UNKNOWN'. SUCCESS/UNABLE_TO_COMPLY/UNKNOWN_SESSION_ID
+%% come from the RFC 6733 base header; the Accounting-Record-Type enum from rf.
+-include_lib("chf_diameter/include/diameter_rfc4006_cc.hrl").
 -include_lib("kernel/include/logger.hrl").
 
 %% diameter application callback exports
@@ -44,17 +49,8 @@
          handle_error/4,
          handle_request/3]).
 
-%% DIAMETER result codes
--define(DIAMETER_SUCCESS,           2001).
--define(DIAMETER_UNABLE_TO_COMPLY,  5012).
--define(DIAMETER_USER_UNKNOWN,      5030).
--define(DIAMETER_UNKNOWN_SESSION_ID, 5002).
-
-%% Accounting-Record-Type values
--define(ART_EVENT,   1).
--define(ART_START,   2).
--define(ART_INTERIM, 3).
--define(ART_STOP,    4).
+%% Result-Code and Accounting-Record-Type constants come from the generated
+%% dictionary headers included above — no hand-defined macros.
 
 %%====================================================================
 %% diameter application callbacks — server-side stubs
@@ -121,7 +117,7 @@ handle_request(#diameter_packet{msg = Msg}, _SvcName, _Peer) ->
 %% Per record-type dispatch
 %%====================================================================
 
-handle_acr(?ART_START, SessionId, Imsi, _UsedRGs) ->
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_START_RECORD', SessionId, Imsi, _UsedRGs) ->
     case ensure_imsi(Imsi, SessionId) of
         {error, _} = Err -> Err;
         ok ->
@@ -140,7 +136,7 @@ handle_acr(?ART_START, SessionId, Imsi, _UsedRGs) ->
             end
     end;
 
-handle_acr(?ART_INTERIM, SessionId, _Imsi, UsedRGs) ->
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_INTERIM_RECORD', SessionId, _Imsi, UsedRGs) ->
     ReqData = #{rating_groups => UsedRGs},
     case chf_core:session_update(SessionId, ReqData) of
         {ok, _} -> ok;
@@ -151,7 +147,7 @@ handle_acr(?ART_INTERIM, SessionId, _Imsi, UsedRGs) ->
             {error, error_code(Reason)}
     end;
 
-handle_acr(?ART_STOP, SessionId, _Imsi, UsedRGs) ->
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_STOP_RECORD', SessionId, _Imsi, UsedRGs) ->
     ReqData = #{rating_groups => UsedRGs},
     case chf_core:session_terminate(SessionId, ReqData) of
         ok ->
@@ -162,7 +158,7 @@ handle_acr(?ART_STOP, SessionId, _Imsi, UsedRGs) ->
             {error, error_code(Reason)}
     end;
 
-handle_acr(?ART_EVENT, SessionId, Imsi, UsedRGs) ->
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_EVENT_RECORD', SessionId, Imsi, UsedRGs) ->
     %% Event record: single shot — create, record, terminate.
     case ensure_imsi(Imsi, SessionId) of
         {error, _} = Err -> Err;
@@ -186,7 +182,7 @@ handle_acr(?ART_EVENT, SessionId, Imsi, UsedRGs) ->
 handle_acr(RecordType, SessionId, _Imsi, _UsedRGs) ->
     ?LOG_WARNING("Rf: unknown Accounting-Record-Type=~w session=~s",
                  [RecordType, SessionId]),
-    {error, ?DIAMETER_UNABLE_TO_COMPLY}.
+    {error, ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'}.
 
 %%====================================================================
 %% ACA builder
@@ -195,8 +191,8 @@ handle_acr(RecordType, SessionId, _Imsi, _UsedRGs) ->
 build_aca(SessionId, OriginHost, OriginRealm, RecordType, RecordNum, Result) ->
     ResultCode =
         case Result of
-            ok              -> ?DIAMETER_SUCCESS;
-            {ok, _}         -> ?DIAMETER_SUCCESS;
+            ok              -> ?'DIAMETER_BASE_RESULT-CODE_SUCCESS';
+            {ok, _}         -> ?'DIAMETER_BASE_RESULT-CODE_SUCCESS';
             {error, Code}   -> Code
         end,
     #diameter_rf_ACA{
@@ -223,7 +219,7 @@ extract_imsi_username(_) ->
 
 ensure_imsi(undefined, SessionId) ->
     ?LOG_WARNING("Rf: no IMSI in ACR session=~s", [SessionId]),
-    {error, ?DIAMETER_USER_UNKNOWN};
+    {error, ?'RESULT-CODE_USER_UNKNOWN'};
 ensure_imsi(_, _) ->
     ok.
 
@@ -231,8 +227,8 @@ ensure_imsi(_, _) ->
 %% Error code mapping
 %%====================================================================
 
-error_code(subscriber_not_found) -> ?DIAMETER_USER_UNKNOWN;
-error_code(subscriber_suspended) -> ?DIAMETER_UNABLE_TO_COMPLY;
-error_code(not_found)            -> ?DIAMETER_UNKNOWN_SESSION_ID;
-error_code(session_terminated)   -> ?DIAMETER_UNKNOWN_SESSION_ID;
-error_code(_)                    -> ?DIAMETER_UNABLE_TO_COMPLY.
+error_code(subscriber_not_found) -> ?'RESULT-CODE_USER_UNKNOWN';
+error_code(subscriber_suspended) -> ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY';
+error_code(not_found)            -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';
+error_code(session_terminated)   -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';
+error_code(_)                    -> ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'.
