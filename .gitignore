@@ -13,3 +13,12 @@ rebar3
 data.*
 log.*
 rebar3.crashdump
+
+# Generated Diameter dictionary .erl/.hrl (produced at build time by OTP's
+# diameter_make via the pre_hooks in apps/chf_diameter/rebar.config)
+apps/*/src/diameter_*.erl
+apps/*/include/diameter_*.hrl
+
+# Empty per-app rebar.lock files rebar3 emits for apps that carry their own
+# rebar.config (e.g. chf_diameter's build hooks); only the root lock matters.
+apps/*/rebar.lock

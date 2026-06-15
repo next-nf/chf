@@ -32,9 +32,10 @@
     extract_used_units_rf/1
 ]).
 
-%% Subscription-Id-Type values (RFC 4006)
--define(END_USER_E164,  0).   %% MSISDN
--define(END_USER_IMSI,  1).
+%% Subscription-Id-Type values come from the generated diameter_3gpp_ts32_299_ro
+%% dictionary header (the RFC 4006 enum, inherited) — no hand-defined macros.
+%% ?'DIAMETER_RO_SUBSCRIPTION-ID-TYPE_END_USER_E164' = 0 (MSISDN),
+%% ?'DIAMETER_RO_SUBSCRIPTION-ID-TYPE_END_USER_IMSI' = 1.
 
 %%====================================================================
 %% Subscription-Id helpers (Ro — #diameter_ro_'Subscription-Id'{})
@@ -45,12 +46,12 @@
 %% Returns the IMSI binary or undefined if not present.
 -spec extract_imsi([#'diameter_ro_Subscription-Id'{}]) -> binary() | undefined.
 extract_imsi(SubIdList) ->
-    find_sub_id_ro(SubIdList, ?END_USER_IMSI).
+    find_sub_id_ro(SubIdList, ?'DIAMETER_RO_SUBSCRIPTION-ID-TYPE_END_USER_IMSI').
 
 %% @doc Extract MSISDN from a list of Subscription-Id AVPs (Ro records).
 -spec extract_msisdn([#'diameter_ro_Subscription-Id'{}]) -> binary() | undefined.
 extract_msisdn(SubIdList) ->
-    find_sub_id_ro(SubIdList, ?END_USER_E164).
+    find_sub_id_ro(SubIdList, ?'DIAMETER_RO_SUBSCRIPTION-ID-TYPE_END_USER_E164').
 
 find_sub_id_ro([], _Type) ->
     undefined;
