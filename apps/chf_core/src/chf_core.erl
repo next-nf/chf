@@ -18,6 +18,7 @@
 -module(chf_core).
 
 -include_lib("chf_db/include/chf_db.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([
     create_session/1,
@@ -113,7 +114,8 @@ do_initial(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
     end,
     case OnlineResult of
         {ok, GrantedMap} ->
-            _ = maybe_offline_initial(Type, Imsi, SessionId),
+            log_charging_error(offline_initial, SessionId,
+                               maybe_offline_initial(Type, Imsi, SessionId)),
             NewOutstanding = add_grants(Outstanding0, GrantedMap),
             Updated = Session#charging_session{
                 granted_units = NewOutstanding,
@@ -141,7 +143,8 @@ do_update(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
     end,
     case OnlineResult of
         {ok, GrantedMap} ->
-            _ = maybe_offline_update(Type, Imsi, SessionId, RatingGroups),
+            log_charging_error(offline_update, SessionId,
+                               maybe_offline_update(Type, Imsi, SessionId, RatingGroups)),
             Outstanding1   = subtract_used(Outstanding0, UsedThis),
             NewOutstanding = add_grants(Outstanding1, GrantedMap),
             Updated = Session#charging_session{
@@ -169,11 +172,17 @@ do_terminate(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
     Instr = [#{rating_group   => RG,
                used_units     => maps:get(RG, UsedThis, 0),
                reserved_units => maps:get(RG, Outstanding0, 0)} || RG <- RGKeys],
-    _ = case is_online(Type) of
+    OnlineRes = case is_online(Type) of
         true  -> chf_online:terminate_request(Imsi, Instr);
         false -> ok
     end,
-    _ = maybe_offline_terminate(Type, Imsi, SessionId, FinalUsed),
+    log_charging_error(online_terminate, SessionId, OnlineRes),
+    log_charging_error(offline_terminate, SessionId,
+                       maybe_offline_terminate(Type, Imsi, SessionId, FinalUsed)),
+    %% Terminate always commits: a charging session must end (otherwise it blocks
+    %% re-use and lingers for the sweeper). Balance/CDR failures above are logged
+    %% (and OTEL-recorded in chf_online) so the discrepancy is observable/alertable
+    %% rather than silently swallowed.
     Terminated = Session#charging_session{
         state         = terminated,
         granted_units = #{},
@@ -212,6 +221,17 @@ maybe_offline_terminate(_, _, _, _) ->
 is_online(online)    -> true;
 is_online(converged) -> true;
 is_online(offline)   -> false.
+
+%% Charging side-effects (balance ops, CDR writes) are best-effort with respect
+%% to the session state machine: a failure must not silently vanish, but neither
+%% should it abort a terminate or leave the session wedged. Log at ERROR so the
+%% inconsistency is observable; chf_online additionally records OTEL outcomes.
+log_charging_error(_Stage, _SessionId, ok)      -> ok;
+log_charging_error(_Stage, _SessionId, {ok, _}) -> ok;
+log_charging_error(Stage, SessionId, {error, Reason}) ->
+    ?LOG_ERROR("chf_core: ~p for session ~s reported errors; balance/CDR state "
+               "may be inconsistent: ~p", [Stage, SessionId, Reason]),
+    ok.
 
 now_ms() -> erlang:system_time(millisecond).
 

@@ -133,6 +133,11 @@ balance_get(AccountId) ->
 
 -spec balance_topup(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.
+%% A negative top-up would silently destroy balance (reduce total/available with
+%% no compensating operation). Reject it. Zero is allowed: subscriber creation
+%% calls balance_topup(_, 0) to materialise an empty balance row.
+balance_topup(_AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
 balance_topup(AccountId, Amount) ->
     F = fun() ->
         B0 = case mnesia:read(balance, AccountId, write) of
@@ -150,6 +155,10 @@ balance_topup(AccountId, Amount) ->
 
 -spec balance_reserve(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.
+%% A negative reservation would pass the `Avail < Amount` check and *decrease*
+%% reserved (a stealth refund that raises available). Reject it.
+balance_reserve(_AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
 balance_reserve(AccountId, Amount) ->
     F = fun() ->
         case mnesia:read(balance, AccountId, write) of

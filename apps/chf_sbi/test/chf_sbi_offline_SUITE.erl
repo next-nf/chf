@@ -143,6 +143,8 @@ create_insufficient_balance_403(Config) ->
     ConnPid = ?config(conn, Config),
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
     meck:expect(chf_core, session_initial, fun(_, _) -> {error, insufficient_balance} end),
+    %% The handler cleans up the orphaned session on an initial failure.
+    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
     Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>}},
     {Status, _H, RespBody} = post_json(ConnPid,
         "/nchf-offlineonlycharging/v1/offlinechargingdata", Body),

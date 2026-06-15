@@ -107,9 +107,13 @@ handle_create(Body, Req, State) ->
                     {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
                     Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
                     {ok, Req2, State};
-                {ok, _Pid} ->
+                {ok, _SessionId} ->
                     case chf_core:session_initial(Ref, #{rating_groups => RatingGroups}) of
                         {error, Reason} ->
+                            %% Clean up the session create_session persisted in
+                            %% its own transaction, so a failed initial does not
+                            %% orphan an active session until the sweeper runs.
+                            _ = chf_core:session_terminate(Ref, #{rating_groups => []}),
                             {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
                             Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
                             {ok, Req2, State};

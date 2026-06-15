@@ -34,7 +34,8 @@
 %% For offline charging the initial request simply records that the
 %% session has started.  A CDR with zero usage is written per
 %% RatingGroup so that downstream mediation can correlate records.
--spec initial_request(Imsi :: binary(), SessionId :: binary()) -> ok.
+-spec initial_request(Imsi :: binary(), SessionId :: binary()) ->
+    ok | {error, term()}.
 initial_request(Imsi, SessionId) ->
     %% Write a single "session-open" CDR with no usage details.
     Cdr = #cdr{
@@ -47,49 +48,43 @@ initial_request(Imsi, SessionId) ->
         timestamp    = erlang:system_time(millisecond),
         metadata     = #{event => session_start}
     },
-    _ = chf_db:cdr_write(Cdr),
-    ok.
+    chf_db:cdr_write(Cdr).
 
 %% @doc Write a partial (interim) CDR for each RatingGroup.
 %%
 %% Data :: #{session_id => binary(),
 %%           rating_groups => [#{rating_group  => non_neg_integer(),
 %%                               used_units    => integer()}]}
--spec update_request(Imsi :: binary(), Data :: map()) -> ok.
+-spec update_request(Imsi :: binary(), Data :: map()) -> ok | {error, term()}.
 update_request(Imsi, Data) ->
     SessionId    = maps:get(session_id, Data),
     RatingGroups = maps:get(rating_groups, Data, []),
-    Now = erlang:system_time(millisecond),
-    lists:foreach(fun(RG) ->
-        RGId  = maps:get(rating_group, RG),
-        Used  = maps:get(used_units, RG, 0),
-        Cdr = #cdr{
-            id           = chf_db:cdr_generate_id(),
-            session_id   = SessionId,
-            imsi         = Imsi,
-            type         = offline,
-            rating_group = RGId,
-            used_units   = #{input => 0, output => 0, total => Used},
-            timestamp    = Now,
-            metadata     = #{event => interim}
-        },
-        _ = chf_db:cdr_write(Cdr)
-    end, RatingGroups),
-    ok.
+    write_usage_cdrs(Imsi, SessionId, RatingGroups, interim).
 
 %% @doc Write final CDRs with all usage at session termination.
 %%
 %% Data :: #{session_id => binary(),
 %%           rating_groups => [#{rating_group  => non_neg_integer(),
 %%                               used_units    => integer()}]}
--spec terminate_request(Imsi :: binary(), Data :: map()) -> ok.
+-spec terminate_request(Imsi :: binary(), Data :: map()) -> ok | {error, term()}.
 terminate_request(Imsi, Data) ->
     SessionId    = maps:get(session_id, Data),
     RatingGroups = maps:get(rating_groups, Data, []),
+    write_usage_cdrs(Imsi, SessionId, RatingGroups, session_stop).
+
+%%====================================================================
+%% Internal helpers
+%%====================================================================
+
+%% Write one usage CDR per RatingGroup, collecting any cdr_write failure so the
+%% caller can observe lost billing records rather than have them silently
+%% discarded. Returns ok when every write succeeded, else {error, {cdr_write_errors, [...]}}.
+-spec write_usage_cdrs(binary(), binary(), [map()], atom()) -> ok | {error, term()}.
+write_usage_cdrs(Imsi, SessionId, RatingGroups, Event) ->
     Now = erlang:system_time(millisecond),
-    lists:foreach(fun(RG) ->
-        RGId  = maps:get(rating_group, RG),
-        Used  = maps:get(used_units, RG, 0),
+    Errors = lists:foldl(fun(RG, ErrAcc) ->
+        RGId = maps:get(rating_group, RG),
+        Used = maps:get(used_units, RG, 0),
         Cdr = #cdr{
             id           = chf_db:cdr_generate_id(),
             session_id   = SessionId,
@@ -98,8 +93,14 @@ terminate_request(Imsi, Data) ->
             rating_group = RGId,
             used_units   = #{input => 0, output => 0, total => Used},
             timestamp    = Now,
-            metadata     = #{event => session_stop}
+            metadata     = #{event => Event}
         },
-        _ = chf_db:cdr_write(Cdr)
-    end, RatingGroups),
-    ok.
+        case chf_db:cdr_write(Cdr) of
+            ok               -> ErrAcc;
+            {error, Reason}  -> [{RGId, Reason} | ErrAcc]
+        end
+    end, [], RatingGroups),
+    case Errors of
+        [] -> ok;
+        _  -> {error, {cdr_write_errors, lists:reverse(Errors)}}
+    end.

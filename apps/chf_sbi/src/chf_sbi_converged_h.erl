@@ -107,9 +107,15 @@ handle_create(Body, Req, State) ->
                     {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
                     Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
                     {ok, Req2, State};
-                {ok, _Pid} ->
+                {ok, _SessionId} ->
                     case chf_core:session_initial(Ref, #{rating_groups => RatingGroups}) of
                         {error, Reason} ->
+                            %% create_session already persisted an active session
+                            %% in its own transaction; the failed initial would
+                            %% orphan it (with any reservation) until the sweeper
+                            %% ages it out. Terminate it now to release the
+                            %% reservation and stop it counting as active.
+                            _ = chf_core:session_terminate(Ref, #{rating_groups => []}),
                             {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
                             Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
                             {ok, Req2, State};

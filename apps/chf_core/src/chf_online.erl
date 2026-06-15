@@ -81,26 +81,54 @@ terminate_request(Imsi, RatingGroups) ->
     case chf_db:subscriber_lookup(Imsi) of
         {ok, Sub} ->
             AccountId = Sub#subscriber.account_id,
-            lists:foreach(fun(RG) ->
+            %% Commit final usage and refund the unused reservation per RG.
+            %% Capture each balance-op result: record the *real* OTEL outcome and
+            %% accumulate failures so the caller can observe (and alert on) lost
+            %% money rather than the previous behaviour of discarding the result
+            %% and recording an unconditional `ok`.
+            Errors = lists:foldl(fun(RG, ErrAcc0) ->
                 Used     = maps:get(used_units,     RG, 0),
                 Reserved = maps:get(reserved_units, RG, 0),
                 Refund   = max(0, Reserved - Used),
-                if Used   > 0 -> _ = chf_db:balance_commit(AccountId, Used),
-                                 chf_otel:record_balance_op(commit, ok); true -> ok end,
-                if Refund > 0 -> _ = chf_db:balance_refund(AccountId, Refund),
-                                 chf_otel:record_balance_op(refund, ok); true -> ok end
-            end, RatingGroups),
-            ok;
+                ErrAcc1 = if Used > 0 ->
+                                 record_balance_op(commit, AccountId, Used, ErrAcc0);
+                             true -> ErrAcc0
+                          end,
+                if Refund > 0 ->
+                       record_balance_op(refund, AccountId, Refund, ErrAcc1);
+                   true -> ErrAcc1
+                end
+            end, [], RatingGroups),
+            case Errors of
+                [] -> ok;
+                _  -> {error, {terminate_balance_errors, lists:reverse(Errors)}}
+            end;
         {error, not_found} ->
             {error, subscriber_not_found}
     end.
+
+%% Apply one terminate-time balance op (commit|refund), record the real OTEL
+%% outcome, and prepend {Op, Reason} to the error accumulator on failure.
+-spec record_balance_op(commit | refund, binary(), integer(), [term()]) -> [term()].
+record_balance_op(commit, AccountId, Amount, ErrAcc) ->
+    classify(commit, chf_db:balance_commit(AccountId, Amount), ErrAcc);
+record_balance_op(refund, AccountId, Amount, ErrAcc) ->
+    classify(refund, chf_db:balance_refund(AccountId, Amount), ErrAcc).
+
+classify(Op, {ok, _}, ErrAcc) ->
+    chf_otel:record_balance_op(Op, ok),
+    ErrAcc;
+classify(Op, {error, Reason}, ErrAcc) ->
+    chf_otel:record_balance_op(Op, Reason),
+    [{Op, Reason} | ErrAcc].
 
 %%====================================================================
 %% Internal helpers
 %%====================================================================
 
 -spec lookup_active_subscriber(binary()) ->
-    {ok, #subscriber{}} | {error, subscriber_not_found | subscriber_suspended}.
+    {ok, #subscriber{}} |
+    {error, subscriber_not_found | subscriber_suspended | subscriber_terminated}.
 lookup_active_subscriber(Imsi) ->
     case chf_db:subscriber_lookup(Imsi) of
         {ok, #subscriber{status = active} = Sub} ->
@@ -108,7 +136,7 @@ lookup_active_subscriber(Imsi) ->
         {ok, #subscriber{status = suspended}} ->
             {error, subscriber_suspended};
         {ok, #subscriber{status = terminated}} ->
-            {error, subscriber_suspended};
+            {error, subscriber_terminated};
         {error, not_found} ->
             {error, subscriber_not_found}
     end.

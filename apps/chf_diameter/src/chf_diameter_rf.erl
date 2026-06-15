@@ -125,10 +125,16 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_START_RECORD', SessionId, Imsi, 
                      imsi       => Imsi,
                      type       => offline},
             case chf_core:create_session(Info) of
-                {ok, _Pid} ->
-                    ReqData = #{imsi => Imsi},
-                    _ = chf_core:session_initial(SessionId, ReqData),
-                    ok;
+                {ok, _SessionId} ->
+                    case chf_core:session_initial(SessionId, #{imsi => Imsi}) of
+                        {ok, _} -> ok;
+                        {error, IErr} ->
+                            %% The initial CDR write failed: surface it rather
+                            %% than answer 2001 SUCCESS on a lost billing record.
+                            ?LOG_WARNING("Rf START session_initial failed session=~s reason=~p",
+                                         [SessionId, IErr]),
+                            {error, error_code(IErr)}
+                    end;
                 {error, Reason} ->
                     ?LOG_WARNING("Rf START create_session failed session=~s reason=~p",
                                  [SessionId, Reason]),
@@ -167,13 +173,21 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_EVENT_RECORD', SessionId, Imsi, 
                      imsi       => Imsi,
                      type       => offline},
             case chf_core:create_session(Info) of
-                {ok, _Pid} ->
-                    _ = chf_core:session_initial(SessionId, #{imsi => Imsi}),
-                    TermData = #{rating_groups => UsedRGs},
-                    _ = chf_core:session_terminate(SessionId, TermData),
-                    ok;
+                {ok, _SessionId} ->
+                    InitRes = chf_core:session_initial(SessionId, #{imsi => Imsi}),
+                    %% Always terminate to settle and clean up the short-lived
+                    %% event session, even if the initial write reported an error.
+                    TermRes = chf_core:session_terminate(SessionId,
+                                                          #{rating_groups => UsedRGs}),
+                    case first_error([InitRes, TermRes]) of
+                        ok -> ok;
+                        {error, EErr} ->
+                            ?LOG_WARNING("Rf EVENT failed session=~s reason=~p",
+                                         [SessionId, EErr]),
+                            {error, error_code(EErr)}
+                    end;
                 {error, Reason} ->
-                    ?LOG_WARNING("Rf EVENT failed session=~s reason=~p",
+                    ?LOG_WARNING("Rf EVENT create_session failed session=~s reason=~p",
                                  [SessionId, Reason]),
                     {error, error_code(Reason)}
             end
@@ -236,7 +250,16 @@ ensure_imsi(_, _) ->
 %%====================================================================
 
 error_code(subscriber_not_found) -> ?'RESULT-CODE_USER_UNKNOWN';
-error_code(subscriber_suspended) -> ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY';
+%% TS 32.299: a suspended/terminated end-user maps to END_USER_SERVICE_DENIED
+%% (4010), not the generic UNABLE_TO_COMPLY (5012).
+error_code(subscriber_suspended) -> ?'RESULT-CODE_END_USER_SERVICE_DENIED';
+error_code(subscriber_terminated) -> ?'RESULT-CODE_END_USER_SERVICE_DENIED';
 error_code(not_found)            -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';
 error_code(session_terminated)   -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';
 error_code(_)                    -> ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'.
+
+%% Return the first {error, _} in a list of charging-op results, else ok.
+first_error([])               -> ok;
+first_error([ok | T])         -> first_error(T);
+first_error([{ok, _} | T])    -> first_error(T);
+first_error([{error, _} = E | _]) -> E.
