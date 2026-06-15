@@ -227,7 +227,6 @@ is_online(offline)   -> false.
 %% should it abort a terminate or leave the session wedged. Log at ERROR so the
 %% inconsistency is observable; chf_online additionally records OTEL outcomes.
 log_charging_error(_Stage, _SessionId, ok)      -> ok;
-log_charging_error(_Stage, _SessionId, {ok, _}) -> ok;
 log_charging_error(Stage, SessionId, {error, Reason}) ->
     ?LOG_ERROR("chf_core: ~p for session ~s reported errors; balance/CDR state "
                "may be inconsistent: ~p", [Stage, SessionId, Reason]),

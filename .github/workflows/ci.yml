@@ -54,11 +54,12 @@ jobs:
       - name: Common Test
         run: rebar3 ct
 
-      # NOTE: `rebar3 dialyzer` is intentionally NOT gated here yet. chf currently
-      # has dialyzer warnings driven by the experimental OpenTelemetry API's loose
-      # success typings plus some pre-existing handler warnings; clearing those is
-      # a separate cleanup, tracked in the roadmap. Add a dialyzer step here once
-      # the tree is warning-clean.
+      # The tree is warning-clean (mnesia/diameter/ranch are in plt_extra_apps;
+      # the few remaining experimental-OTEL-API + Mnesia-match-spec warnings are
+      # suppressed at the function level with explanatory -dialyzer attributes).
+      # The PLT is cached via _build above, so steady-state runs are fast.
+      - name: Dialyzer
+        run: rebar3 dialyzer
 
       # GitHub bills artifacts by uncompressed size; upload one pre-compressed tarball.
       - name: Package CT logs on failure

@@ -33,6 +33,11 @@
 -define(OUTCOME, {?MODULE, charging_outcome}).
 -define(BALANCE, {?MODULE, balance_operation}).
 
+%% opentelemetry_experimental:get_meter/1 has an over-narrow success typing in
+%% this (experimental) build, which makes dialyzer believe setup_metrics/0 never
+%% returns and cascades into chf_otel_app. The code is correct; suppress here.
+-dialyzer({nowarn_function, [setup_metrics/0]}).
+
 -spec setup_metrics() -> ok.
 setup_metrics() ->
     Meter = opentelemetry_experimental:get_meter(?MODULE),

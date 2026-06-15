@@ -42,6 +42,14 @@
     session_transaction/2
 ]).
 
+%% cdr_list/1 and session_list_active/0 build Mnesia match-object patterns by
+%% assigning the wildcard atom '_' to typed record fields (e.g. used_units,
+%% timestamp, state). That is the idiomatic Mnesia query form and is correct at
+%% runtime, but it violates the records' static field types, which dialyzer
+%% (rightly, for ordinary construction) flags — and the resulting none() return
+%% then cascades into a spurious "no local return". Suppress these two.
+-dialyzer({nowarn_function, [cdr_list/1, session_list_active/0]}).
+
 %%====================================================================
 %% Backend API — init/1
 %%====================================================================
@@ -270,7 +278,7 @@ cdr_write(#cdr{} = Cdr) ->
         {error, _} = Err -> Err
     end.
 
--spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]}.
+-spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]} | {error, term()}.
 cdr_list(Filters) ->
     %% Build a match-spec pattern from the Filters map.
     %% Supported filter keys: session_id, imsi, type, rating_group.

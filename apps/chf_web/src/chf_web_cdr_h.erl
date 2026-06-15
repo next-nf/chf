@@ -101,8 +101,7 @@ used_units_to_map(Used) when is_map(Used) ->
                  true       -> K
               end,
         A#{Key => V}
-    end, #{}, Used);
-used_units_to_map(_) -> #{}.
+    end, #{}, Used).
 
 meta_to_map(Meta) when is_map(Meta) ->
     maps:fold(fun(K, V, A) ->
@@ -115,8 +114,7 @@ meta_to_map(Meta) when is_map(Meta) ->
                  true -> iolist_to_binary(io_lib:format("~p", [V]))
               end,
         A#{Key => Val}
-    end, #{}, Meta);
-meta_to_map(_) -> #{}.
+    end, #{}, Meta).
 
 reply(Status, Data, Req0, State) ->
     Body = iolist_to_binary(json:encode(Data)),
