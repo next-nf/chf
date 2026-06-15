@@ -179,6 +179,7 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
             {error, Code} ->
                 {Code, []}
         end,
+    chf_otel:record_charging_outcome(gy, outcome_atom(Result)),
     #diameter_ro_CCA{
         'Session-Id'                     = SessionId,
         'Result-Code'                    = ResultCode,
@@ -189,6 +190,13 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
         'CC-Request-Number'              = ReqNumber,
         'Multiple-Services-Credit-Control' = MSCCList
     }.
+
+%% map the charging result to a metric-friendly outcome atom
+outcome_atom({ok, _})                          -> success;
+outcome_atom({error, ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED'}) -> insufficient_balance;
+outcome_atom({error, ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN'})         -> user_unknown;
+outcome_atom({error, ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID'}) -> unknown_session;
+outcome_atom({error, _})                       -> unable_to_comply.
 
 %%====================================================================
 %% Error code mapping
