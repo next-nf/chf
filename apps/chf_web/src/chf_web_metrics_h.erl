@@ -15,10 +15,16 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-{application, chf_api, [
-    {vsn, semver},
-    {description, "Next-CHF Provisioning REST API"},
-    {applications, [kernel, stdlib, cowboy, opentelemetry_cowboy_h, chf_db]},
-    {mod, {chf_api_app, []}},
-    {registered, []}
-]}.
+-module(chf_web_metrics_h).
+-export([init/2]).
+
+init(Req0, State) ->
+    Body = otel_metric_reader:collect(otel_prometheus_reader,
+               fun(Metrics, Resource) ->
+                   iolist_to_binary(
+                       otel_metric_serializer_prometheus:serialize(Metrics, Resource, #{}))
+               end),
+    Req = cowboy_req:reply(200,
+            #{<<"content-type">> => <<"text/plain; version=0.0.4">>},
+            Body, Req0),
+    {ok, Req, State}.

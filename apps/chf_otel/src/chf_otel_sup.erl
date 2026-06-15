@@ -15,10 +15,18 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-{application, chf_api, [
-    {vsn, semver},
-    {description, "Next-CHF Provisioning REST API"},
-    {applications, [kernel, stdlib, cowboy, opentelemetry_cowboy_h, chf_db]},
-    {mod, {chf_api_app, []}},
-    {registered, []}
-]}.
+-module(chf_otel_sup).
+-moduledoc "Top-level supervisor for the `chf_otel` app (currently no children).".
+
+-behaviour(supervisor).
+
+-export([start_link/0]).
+-export([init/1]).
+
+-define(SERVER, ?MODULE).
+
+start_link() ->
+    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+
+init([]) ->
+    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, []}}.

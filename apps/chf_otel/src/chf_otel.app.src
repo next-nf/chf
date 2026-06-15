@@ -15,10 +15,17 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-{application, chf_api, [
-    {vsn, semver},
-    {description, "Next-CHF Provisioning REST API"},
-    {applications, [kernel, stdlib, cowboy, opentelemetry_cowboy_h, chf_db]},
-    {mod, {chf_api_app, []}},
-    {registered, []}
+{application, chf_otel, [
+    {description, "OpenTelemetry setup: charging metric instruments + HTTP/diameter/beam metric init"},
+    {vsn, "0.1.0"},
+    {registered, [chf_otel_sup]},
+    {mod, {chf_otel_app, []}},
+    {applications, [kernel, stdlib, opentelemetry_api, opentelemetry,
+                    opentelemetry_experimental, opentelemetry_api_experimental,
+                    opentelemetry_cowboy_experimental_h, opentelemetry_beam,
+                    opentelemetry_diameter]},
+    {env, []},
+    {modules, []},
+    {licenses, ["AGPL-3.0-or-later"]},
+    {links, []}
 ]}.

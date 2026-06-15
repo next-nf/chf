@@ -85,8 +85,10 @@ terminate_request(Imsi, RatingGroups) ->
                 Used     = maps:get(used_units,     RG, 0),
                 Reserved = maps:get(reserved_units, RG, 0),
                 Refund   = max(0, Reserved - Used),
-                if Used   > 0 -> _ = chf_db:balance_commit(AccountId, Used); true -> ok end,
-                if Refund > 0 -> _ = chf_db:balance_refund(AccountId, Refund); true -> ok end
+                if Used   > 0 -> _ = chf_db:balance_commit(AccountId, Used),
+                                 chf_otel:record_balance_op(commit, ok); true -> ok end,
+                if Refund > 0 -> _ = chf_db:balance_refund(AccountId, Refund),
+                                 chf_otel:record_balance_op(refund, ok); true -> ok end
             end, RatingGroups),
             ok;
         {error, not_found} ->
@@ -124,8 +126,10 @@ grant_units(Sub, [RG | Rest], Acc) ->
     GrantAmount  = min(Requested, DefaultQuota),
     case chf_db:balance_reserve(AccountId, GrantAmount) of
         {ok, _Balance} ->
+            chf_otel:record_balance_op(reserve, ok),
             grant_units(Sub, Rest, Acc#{RGId => GrantAmount});
         {error, Reason} ->
+            chf_otel:record_balance_op(reserve, Reason),
             {error, Reason}
     end.
 
@@ -136,8 +140,12 @@ commit_used(_AccountId, []) ->
 commit_used(AccountId, [RG | Rest]) ->
     Used = maps:get(used_units, RG, 0),
     case chf_db:balance_commit(AccountId, Used) of
-        {ok, _} -> commit_used(AccountId, Rest);
-        {error, Reason} -> {error, Reason}
+        {ok, _} ->
+            chf_otel:record_balance_op(commit, ok),
+            commit_used(AccountId, Rest);
+        {error, Reason} ->
+            chf_otel:record_balance_op(commit, Reason),
+            {error, Reason}
     end.
 
 %% Retrieve the configured quota for a RatingGroup (falls back to default).

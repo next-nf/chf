@@ -32,7 +32,9 @@ start(_StartType, _StartArgs) ->
     ]),
     {ok, _} = cowboy:start_clear(chf_api_listener,
         [{port, Port}, {ip, Ip}],
-        #{env => #{dispatch => Dispatch}}),
+        #{env => #{dispatch => Dispatch},
+          otel_opts => #{metrics_cb => fun opentelemetry_cowboy_experimental_h:metrics_cb/5},
+          stream_handlers => [opentelemetry_cowboy_h, cowboy_stream_h]}),
     chf_api_sup:start_link().
 
 stop(_State) ->

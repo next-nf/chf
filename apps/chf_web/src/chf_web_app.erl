@@ -38,13 +38,15 @@ start(_StartType, _StartArgs) ->
             {"/api/subscribers",                 chf_web_subscriber_h,  []},
             {"/api/subscribers/:imsi",           chf_web_subscriber_h,  []},
 
-            %% Prometheus metrics
-            {"/metrics", prometheus_cowboy_handler, []}
+            %% OTEL-sourced Prometheus metrics (pull reader -> text exposition)
+            {"/metrics", chf_web_metrics_h, []}
         ]}
     ]),
     {ok, _} = cowboy:start_clear(chf_web_listener,
         [{port, Port}, {ip, Ip}],
-        #{env => #{dispatch => Dispatch}}),
+        #{env => #{dispatch => Dispatch},
+          otel_opts => #{metrics_cb => fun opentelemetry_cowboy_experimental_h:metrics_cb/5},
+          stream_handlers => [opentelemetry_cowboy_h, cowboy_stream_h]}),
     chf_web_sup:start_link().
 
 stop(_State) ->
