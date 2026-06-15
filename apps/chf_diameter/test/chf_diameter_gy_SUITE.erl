@@ -55,7 +55,7 @@ all() ->
      ccr_update_success,
      ccr_terminate_success,
      ccr_unknown_error,
-     ccr_initial_insufficient_balance,
+     ccr_initial_credit_limited_grants_zero,
      ccr_update_unknown_session,
      ccr_update_session_terminated,
      ccr_event_request,
@@ -221,13 +221,17 @@ ccr_unknown_error(_Config) ->
         'Result-Code' = ?DIAMETER_UNABLE_TO_COMPLY
     }}, Result).
 
-ccr_initial_insufficient_balance(_Config) ->
+%% A credit-limited rating group (zero available balance) is no longer a
+%% command-level error: chf_core returns {ok, #{... outcome => credit_limit_reached}}
+%% and the CCA carries command-level SUCCESS with a zero grant. INTERIM — a
+%% later task adds the per-MSCC Final-Unit-Indication verdict; until then the
+%% wire is unchanged from the all-granted case.
+ccr_initial_credit_limited_grants_zero(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
     meck:expect(chf_core, session_initial, fun(_, _) ->
         {ok, #{1 => #{granted => 0, outcome => credit_limit_reached}}} end),
     SubId = make_sub_id_imsi(<<"001010123456789">>),
     CCR = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 100, 0)]),
-    %% INTERIM (finalised in a later task): command-level success; per-MSCC verdict added later.
     ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}},
                  call_handler(CCR)).
 

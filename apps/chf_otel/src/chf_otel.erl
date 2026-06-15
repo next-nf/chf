@@ -65,6 +65,11 @@ record_charging_outcome(Interface, Outcome) ->
             ok
     end.
 
+%% Record a balance operation outcome. Result is the per-op outcome tag:
+%%   reserve  -> ok | credit_limit_reached  (the online grant classification)
+%%   commit   -> ok | <db error atom>       (e.g. not_found, insufficient_balance)
+%%   refund   -> ok | <db error atom>
+%% Any atom is accepted; these are the values the charging engine currently emits.
 -spec record_balance_op(Op :: atom(), Result :: atom()) -> ok.
 record_balance_op(Op, Result) ->
     case persistent_term:get(?BALANCE, undefined) of

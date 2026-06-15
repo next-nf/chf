@@ -28,6 +28,13 @@
     session_terminate_if_stale/2
 ]).
 
+%% Per-rating-group charging outcome returned by session_initial/session_update.
+%% For offline-only sessions the map is empty (no online grant processing).
+-type outcome_map() ::
+    #{non_neg_integer() => #{granted => non_neg_integer(),
+                             outcome => granted | final_grant | credit_limit_reached}}.
+-export_type([outcome_map/0]).
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -55,7 +62,7 @@ create_session(#{session_id := SessionId, imsi := Imsi, type := Type}) ->
     end).
 
 -spec session_initial(SessionId :: binary(), RequestData :: map()) ->
-    {ok, map()} | {error, term()}.
+    {ok, outcome_map()} | {error, term()}.
 session_initial(SessionId, RequestData) ->
     chf_db:session_transaction(SessionId, fun
         (#charging_session{state = active} = S) -> do_initial(S, RequestData);
@@ -64,7 +71,7 @@ session_initial(SessionId, RequestData) ->
     end).
 
 -spec session_update(SessionId :: binary(), RequestData :: map()) ->
-    {ok, map()} | {error, term()}.
+    {ok, outcome_map()} | {error, term()}.
 session_update(SessionId, RequestData) ->
     chf_db:session_transaction(SessionId, fun
         (#charging_session{state = active} = S) -> do_update(S, RequestData);
@@ -256,5 +263,6 @@ merge_add(A, B) ->
 
 %% Project an outcome map (#{RGId => #{granted => G, outcome => _}}) down to
 %% a plain grant map (#{RGId => G}) for use with add_grants/subtract_used.
+-spec granted_amounts(outcome_map()) -> #{non_neg_integer() => non_neg_integer()}.
 granted_amounts(OutcomeMap) ->
     maps:map(fun(_RGId, #{granted := G}) -> G end, OutcomeMap).

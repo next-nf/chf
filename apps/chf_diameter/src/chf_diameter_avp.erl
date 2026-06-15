@@ -119,7 +119,8 @@ extract_usu_total(USUList) ->
 
 %% @doc Build a list of Multiple-Services-Credit-Control records for a CCA,
 %%      given an outcome map of #{RatingGroupId => #{granted => Octets, outcome => atom()}}.
--spec build_mscc_response(map()) ->
+-spec build_mscc_response(#{non_neg_integer() =>
+                            #{granted => non_neg_integer(), outcome => atom()}}) ->
     [#'diameter_ro_Multiple-Services-Credit-Control'{}].
 build_mscc_response(OutcomeMap) ->
     maps:fold(fun(RGId, #{granted := GrantedAmount}, Acc) ->

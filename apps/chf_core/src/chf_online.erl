@@ -145,12 +145,13 @@ lookup_active_subscriber(Imsi) ->
     end.
 
 %% Reserve quota for each RatingGroup, accumulating per-RG outcome maps.
+%% Never returns {error, _}: balance exhaustion / a missing balance record is
+%% absorbed into the credit_limit_reached outcome (see reserve_rg/2).
 -spec grant_units(#subscriber{}, [map()],
                   #{non_neg_integer() => #{granted => non_neg_integer(),
                                            outcome => granted | final_grant | credit_limit_reached}}) ->
     {ok, #{non_neg_integer() => #{granted => non_neg_integer(),
-                                  outcome => granted | final_grant | credit_limit_reached}}} |
-    {error, term()}.
+                                  outcome => granted | final_grant | credit_limit_reached}}}.
 grant_units(_Sub, [], Acc) ->
     {ok, Acc};
 grant_units(Sub, [RG | Rest], Acc) ->
