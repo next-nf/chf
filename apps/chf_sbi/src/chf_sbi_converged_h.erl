@@ -248,8 +248,9 @@ sum_used_units(_) -> 0.
 %% RatingGroups :: [#{rating_group => id(), ...}] — the parsed request groups.
 %%
 %% We produce multipleUnitInformation for every requested rating group,
-%% using resultCode 4012 + finalUnitIndication(TERMINATE) on credit_limit_reached,
-%% finalUnitIndication(TERMINATE) on final_grant, and omitting grantedUnit when zero.
+%% using resultCode 4012 + finalUnitIndication(TERMINATE) on credit_limit_reached
+%% (no grantedUnit, no validityTime), and finalUnitIndication(TERMINATE) on
+%% final_grant.
 -spec build_response(chf_core:outcome_map(), [map()]) -> iodata().
 build_response(OutcomeMap, RatingGroups) ->
     ValidityTime = application:get_env(chf_sbi, validity_time, 3600),
@@ -264,20 +265,25 @@ build_response(OutcomeMap, RatingGroups) ->
     end, RatingGroups),
     chf_sbi_json:encode(#{<<"multipleUnitInformation">> => MUI}).
 
--spec mui_entry(non_neg_integer(), non_neg_integer(), atom(), pos_integer()) -> map().
+%% credit_limit_reached: nothing granted, so no grantedUnit and no validityTime
+%% (validityTime only scopes an actual grant — RFC 4006 §8.7 / TS 32.291; this
+%% mirrors the Diameter sibling's build_one_mscc/4). FUI(TERMINATE) is emitted.
+-spec mui_entry(non_neg_integer(), non_neg_integer(),
+                granted | final_grant | credit_limit_reached,
+                pos_integer()) -> map().
+mui_entry(RGId, _Granted, credit_limit_reached, _ValidityTime) ->
+    #{<<"ratingGroup">>         => RGId,
+      <<"resultCode">>          => 4012,
+      <<"finalUnitIndication">> => #{<<"finalUnitAction">> => <<"TERMINATE">>}};
 mui_entry(RGId, Granted, Outcome, ValidityTime) ->
-    ResultCode = case Outcome of credit_limit_reached -> 4012; _ -> 2001 end,
     Base = #{<<"ratingGroup">>  => RGId,
-             <<"resultCode">>   => ResultCode,
-             <<"validityTime">> => ValidityTime},
-    WithGrant = case Granted > 0 of
-                    true  -> Base#{<<"grantedUnit">> => #{<<"totalVolume">> => Granted}};
-                    false -> Base
-                end,
+             <<"resultCode">>   => 2001,
+             <<"validityTime">> => ValidityTime,
+             <<"grantedUnit">>  => #{<<"totalVolume">> => Granted}},
     case Outcome of
-        granted -> WithGrant;
-        _       -> WithGrant#{<<"finalUnitIndication">> =>
-                                  #{<<"finalUnitAction">> => <<"TERMINATE">>}}
+        granted     -> Base;
+        final_grant -> Base#{<<"finalUnitIndication">> =>
+                                 #{<<"finalUnitAction">> => <<"TERMINATE">>}}
     end.
 
 %% Generate a unique chargingDataRef.

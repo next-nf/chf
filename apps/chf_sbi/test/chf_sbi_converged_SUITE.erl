@@ -40,7 +40,8 @@ all() ->
      create_insufficient_balance_403,
      update_large_body_413,
      converged_response_final_unit_indication,
-     converged_response_full_grant_no_fui].
+     converged_response_full_grant_no_fui,
+     converged_response_final_grant_fui_with_grant].
 
 init_per_suite(Config) ->
     %% Start cowboy and ranch if not already running.
@@ -276,6 +277,22 @@ converged_response_full_grant_no_fui(Config) ->
     ?assertEqual(2001, maps:get(<<"resultCode">>, MUI)),
     ?assertNot(maps:is_key(<<"finalUnitIndication">>, MUI)),
     ?assertEqual(1000, maps:get(<<"totalVolume">>, maps:get(<<"grantedUnit">>, MUI))).
+
+%% final_grant: last grant before exhaustion — 2001 + grantedUnit AND FUI(TERMINATE).
+converged_response_final_grant_fui_with_grant(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 500, outcome => final_grant}}} end),
+    Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>},
+             <<"multipleUnitUsage">> => [#{<<"ratingGroup">> => 1,
+                                           <<"requestedUnit">> => #{<<"totalVolume">> => 1000}}]},
+    {201, _H, RespBody} = post_json(ConnPid, "/nchf-convergedcharging/v3/chargingdata", Body),
+    #{<<"multipleUnitInformation">> := [MUI]} = decode(RespBody),
+    ?assertEqual(2001, maps:get(<<"resultCode">>, MUI)),
+    ?assertEqual(500, maps:get(<<"totalVolume">>, maps:get(<<"grantedUnit">>, MUI))),
+    ?assertEqual(<<"TERMINATE">>,
+                 maps:get(<<"finalUnitAction">>, maps:get(<<"finalUnitIndication">>, MUI))).
 
 %%====================================================================
 %% Internal helpers
