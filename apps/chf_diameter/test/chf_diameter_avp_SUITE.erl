@@ -129,8 +129,8 @@ extract_mscc_ro_empty(_Config) ->
 %%====================================================================
 
 build_mscc_response_single(_Config) ->
-    GrantedMap = #{1 => 5000000},
-    Result = chf_diameter_avp:build_mscc_response(GrantedMap),
+    OutcomeMap = #{1 => #{granted => 5000000, outcome => granted}},
+    Result = chf_diameter_avp:build_mscc_response(OutcomeMap),
     ?assertMatch([#'diameter_ro_Multiple-Services-Credit-Control'{
         'Rating-Group'         = [1],
         'Granted-Service-Unit' = [#'diameter_ro_Granted-Service-Unit'{

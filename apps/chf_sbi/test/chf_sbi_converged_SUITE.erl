@@ -90,7 +90,8 @@ end_per_testcase(_TestCase, Config) ->
 create_session_success(Config) ->
     ConnPid = ?config(conn, Config),
     meck:expect(chf_core, create_session, fun(_) -> {ok, <<"test-session-1">>} end),
-    meck:expect(chf_core, session_initial, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 5000000, outcome => granted}}} end),
 
     Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>},
              <<"multipleUnitUsage">>    => [
@@ -118,7 +119,8 @@ create_session_missing_imsi(Config) ->
 
 update_session_success(Config) ->
     ConnPid = ?config(conn, Config),
-    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    meck:expect(chf_core, session_update, fun(_, _) ->
+        {ok, #{1 => #{granted => 5000000, outcome => granted}}} end),
 
     Body = #{<<"multipleUnitUsage">> => [
         #{<<"ratingGroup">>   => 1,
@@ -208,7 +210,8 @@ release_session_terminated(Config) ->
 %% Content-Type: application/json; the handler should return 415 on mismatch.
 wrong_content_type(Config) ->
     ConnPid = ?config(conn, Config),
-    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    meck:expect(chf_core, session_update, fun(_, _) ->
+        {ok, #{1 => #{granted => 5000000, outcome => granted}}} end),
     Body = json:encode(#{<<"multipleUnitUsage">> => []}),
     Headers = [{<<"content-type">>, <<"text/plain">>}],
     StreamRef = gun:post(ConnPid,

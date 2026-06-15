@@ -31,7 +31,10 @@ all() ->
      concurrent_updates_no_lost_usage,
      online_initial_rejected_for_terminated_subscriber,
      converged_lifecycle_charges_and_writes_cdrs,
-     sweeper_survives_stray_message].
+     sweeper_survives_stray_message,
+     partial_grant_marks_final,
+     zero_available_credit_limit_reached,
+     multi_rg_drain_leaves_trailing_credit_limited].
 
 init_per_testcase(_TC, Config) -> setup_mnesia(), Config.
 end_per_testcase(_TC, _Config) -> mnesia:stop(), ok.
@@ -168,6 +171,29 @@ converged_lifecycle_charges_and_writes_cdrs(_) ->
     assert_invariant(<<"a">>),
     {ok, Cdrs} = chf_db:cdr_list(#{session_id => <<"s">>}),
     ?assert(length(Cdrs) >= 3).
+
+partial_grant_marks_final(_) ->
+    ok = seed_subscriber(<<"001">>, <<"a">>, 300),
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => online}),
+    {ok, Out} = chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 1000, 0)]}),
+    #{1 := #{granted := G, outcome := Outcome}} = Out,
+    ?assertEqual(300, G), ?assertEqual(final_grant, Outcome),
+    ?assertEqual(300, (balance(<<"a">>))#balance.reserved).
+
+zero_available_credit_limit_reached(_) ->
+    ok = seed_subscriber(<<"001">>, <<"a">>, 0),
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => online}),
+    {ok, Out} = chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 1000, 0)]}),
+    #{1 := #{granted := G, outcome := Outcome}} = Out,
+    ?assertEqual(0, G), ?assertEqual(credit_limit_reached, Outcome).
+
+multi_rg_drain_leaves_trailing_credit_limited(_) ->
+    ok = seed_subscriber(<<"001">>, <<"a">>, 1000),
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => online}),
+    {ok, Out} = chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 1000, 0), rg(2, 1000, 0)]}),
+    #{1 := #{granted := G1, outcome := O1}, 2 := #{granted := G2, outcome := O2}} = Out,
+    ?assertEqual(1000, G1), ?assertEqual(granted, O1),
+    ?assertEqual(0, G2), ?assertEqual(credit_limit_reached, O2).
 
 sweeper_survives_stray_message(_) ->
     application:set_env(chf_core, sweep_interval, 100),

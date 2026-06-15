@@ -113,15 +113,15 @@ do_initial(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
         false -> {ok, #{}}
     end,
     case OnlineResult of
-        {ok, GrantedMap} ->
+        {ok, OutcomeMap} ->
             log_charging_error(offline_initial, SessionId,
                                maybe_offline_initial(Type, Imsi, SessionId)),
-            NewOutstanding = add_grants(Outstanding0, GrantedMap),
+            NewOutstanding = add_grants(Outstanding0, granted_amounts(OutcomeMap)),
             Updated = Session#charging_session{
                 granted_units = NewOutstanding,
                 updated_at    = now_ms()
             },
-            {commit, Updated, {ok, GrantedMap}};
+            {commit, Updated, {ok, OutcomeMap}};
         {error, Reason} ->
             {abort, Reason}
     end.
@@ -142,17 +142,17 @@ do_update(#charging_session{type = Type, imsi = Imsi, session_id = SessionId,
         false -> {ok, #{}}
     end,
     case OnlineResult of
-        {ok, GrantedMap} ->
+        {ok, OutcomeMap} ->
             log_charging_error(offline_update, SessionId,
                                maybe_offline_update(Type, Imsi, SessionId, RatingGroups)),
             Outstanding1   = subtract_used(Outstanding0, UsedThis),
-            NewOutstanding = add_grants(Outstanding1, GrantedMap),
+            NewOutstanding = add_grants(Outstanding1, granted_amounts(OutcomeMap)),
             Updated = Session#charging_session{
                 granted_units = NewOutstanding,
                 used_units    = NewUsed,
                 updated_at    = now_ms()
             },
-            {commit, Updated, {ok, GrantedMap}};
+            {commit, Updated, {ok, OutcomeMap}};
         {error, Reason} ->
             {abort, Reason}
     end.
@@ -253,3 +253,8 @@ subtract_used(Outstanding, UsedThis) ->
 
 merge_add(A, B) ->
     maps:fold(fun(K, V, Acc) -> Acc#{K => maps:get(K, Acc, 0) + V} end, A, B).
+
+%% Project an outcome map (#{RGId => #{granted => G, outcome => _}}) down to
+%% a plain grant map (#{RGId => G}) for use with add_grants/subtract_used.
+granted_amounts(OutcomeMap) ->
+    maps:map(fun(_RGId, #{granted := G}) -> G end, OutcomeMap).

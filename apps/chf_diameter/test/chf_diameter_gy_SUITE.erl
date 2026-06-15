@@ -136,7 +136,8 @@ call_handler(CCR) ->
 
 ccr_initial_success(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"test-session">>} end),
-    meck:expect(chf_core, session_initial, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 5000000, outcome => granted}}} end),
 
     SessionId = <<"test-session-1">>,
     SubId = make_sub_id_imsi(<<"001010123456789">>),
@@ -177,7 +178,8 @@ ccr_initial_core_error(_Config) ->
     }}, Result).
 
 ccr_update_success(_Config) ->
-    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    meck:expect(chf_core, session_update, fun(_, _) ->
+        {ok, #{1 => #{granted => 5000000, outcome => granted}}} end),
 
     SessionId = <<"test-session-update">>,
     MSCC = make_mscc(1, 10000000, 3000000),
@@ -221,12 +223,12 @@ ccr_unknown_error(_Config) ->
 
 ccr_initial_insufficient_balance(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
-    meck:expect(chf_core, session_initial, fun(_, _) -> {error, insufficient_balance} end),
-    %% The handler cleans up the orphaned session on an initial failure.
-    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 0, outcome => credit_limit_reached}}} end),
     SubId = make_sub_id_imsi(<<"001010123456789">>),
     CCR = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 100, 0)]),
-    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_CREDIT_LIMIT_REACHED}},
+    %% INTERIM (finalised in a later task): command-level success; per-MSCC verdict added later.
+    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}},
                  call_handler(CCR)).
 
 ccr_update_unknown_session(_Config) ->
@@ -258,7 +260,8 @@ ccr_event_request(_Config) ->
 ccr_initial_multi_mscc(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"multi-session">>} end),
     meck:expect(chf_core, session_initial, fun(_, _) ->
-        {ok, #{1 => 5000000, 2 => 3000000}}
+        {ok, #{1 => #{granted => 5000000, outcome => granted},
+               2 => #{granted => 3000000, outcome => granted}}}
     end),
 
     SessionId = <<"multi-mscc-session">>,

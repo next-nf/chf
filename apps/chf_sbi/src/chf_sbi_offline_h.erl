@@ -237,10 +237,16 @@ sum_used_units(List) when is_list(List) ->
 sum_used_units(_) -> 0.
 
 %% Build the OfflineChargingDataResponse body.
-build_response(GrantedMap, RatingGroups) ->
+%%
+%% OutcomeMap :: #{RatingGroupId => #{granted => integer(), outcome => atom()}}
+%%               or #{} for offline sessions.
+build_response(OutcomeMap, RatingGroups) ->
     MUI = lists:map(fun(RG) ->
         RGId    = maps:get(rating_group, RG, 0),
-        Granted = maps:get(RGId, GrantedMap, 0),
+        Granted = case maps:get(RGId, OutcomeMap, undefined) of
+                      #{granted := G} -> G;
+                      _               -> 0
+                  end,
         #{<<"ratingGroup">>  => RGId,
           <<"grantedUnit">>  => #{<<"totalVolume">> => Granted},
           <<"resultCode">>   => 2001,

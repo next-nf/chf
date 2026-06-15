@@ -243,15 +243,19 @@ sum_used_units(_) -> 0.
 
 %% Build the ChargingDataResponse body.
 %%
-%% GrantedMap :: #{RatingGroupId => GrantedUnits} from chf_online.
+%% OutcomeMap :: #{RatingGroupId => #{granted => integer(), outcome => atom()}}
+%%               from chf_core (online/converged) or #{} (offline).
 %% RatingGroups :: [#{rating_group => id(), ...}] — the parsed request groups.
 %%
 %% We produce multipleUnitInformation for every requested rating group,
 %% falling back to 0 if the session did not grant anything for that group.
-build_response(GrantedMap, RatingGroups) ->
+build_response(OutcomeMap, RatingGroups) ->
     MUI = lists:map(fun(RG) ->
         RGId    = maps:get(rating_group, RG, 0),
-        Granted = maps:get(RGId, GrantedMap, 0),
+        Granted = case maps:get(RGId, OutcomeMap, undefined) of
+                      #{granted := G} -> G;
+                      _               -> 0
+                  end,
         #{<<"ratingGroup">>  => RGId,
           <<"grantedUnit">>  => #{<<"totalVolume">> => Granted},
           <<"resultCode">>   => 2001,

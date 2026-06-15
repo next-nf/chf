@@ -118,11 +118,11 @@ extract_usu_total(USUList) ->
 %%====================================================================
 
 %% @doc Build a list of Multiple-Services-Credit-Control records for a CCA,
-%%      given a map of #{RatingGroupId => GrantedOctets}.
--spec build_mscc_response(#{non_neg_integer() => integer()}) ->
+%%      given an outcome map of #{RatingGroupId => #{granted => Octets, outcome => atom()}}.
+-spec build_mscc_response(map()) ->
     [#'diameter_ro_Multiple-Services-Credit-Control'{}].
-build_mscc_response(GrantedMap) ->
-    maps:fold(fun(RGId, GrantedAmount, Acc) ->
+build_mscc_response(OutcomeMap) ->
+    maps:fold(fun(RGId, #{granted := GrantedAmount}, Acc) ->
         GSU = #'diameter_ro_Granted-Service-Unit'{
             'CC-Total-Octets' = [GrantedAmount]
         },
@@ -132,7 +132,7 @@ build_mscc_response(GrantedMap) ->
             'Validity-Time'        = [3600]   %% 1 hour validity
         },
         [MSCC | Acc]
-    end, [], GrantedMap).
+    end, [], OutcomeMap).
 
 %%====================================================================
 %% Rf helper — extract used units from Service-Information
