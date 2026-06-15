@@ -211,16 +211,30 @@ OpenTelemetry semantic conventions):
 startup. These metrics poll `diameter:services()` at collect time; they cover
 all active Diameter services on the node.
 
-The CHF runs two Diameter service namespaces:
+The CHF runs a single Diameter service, `next-chf` (the `?SERVICE` macro in
+`chf_diameter_srv`), which hosts both interfaces as separate Diameter
+applications. Gy and Rf are therefore distinguished not by the service-name
+label but by the per-message application/command labels:
 
-| Service | Interface | Application |
-| --- | --- | --- |
-| `chf_diameter_gy_service` | Gy / Ro (online charging) | `chf_diameter` |
-| `chf_diameter_rf_service` | Rf (offline charging / accounting) | `chf_diameter` |
+| Interface | Distinguishing label values |
+| --- | --- |
+| Gy / Ro (online charging) | `diameter_command_name` ∈ `CCR`/`CCA` (Credit-Control) |
+| Rf (offline charging / accounting) | `diameter_command_name` ∈ `ACR`/`ACA` (Accounting) |
 
-**Instruments:** `diameter.application.count`, `diameter.connection.count`,
-`diameter.message.count`, `diameter.connection.io`, `diameter.connection.packets`,
-`diameter.error.count`.
+The `diameter_service_name` label carries the value `next-chf` on every Diameter
+metric, so it is not useful for splitting Gy from Rf — group by
+`diameter_command_name` (or `diameter_application_id`) instead.
+
+**Instruments** (instrument base names; the Prometheus exporter renders monotonic
+counters with a `_total` suffix, e.g. `diameter_message_count_total`, and leaves
+gauges such as `diameter_connection_count` unsuffixed): `diameter.application.count`,
+`diameter.connection.count`, `diameter.message.count`, `diameter.connection.io`,
+`diameter.connection.packets`, `diameter.error.count`.
+
+**Key attribute keys** (Prometheus label form): `diameter_service_name`,
+`diameter_peer_origin_host`, `diameter_command_name`, `diameter_application_id`,
+`message_direction` (`sent`/`received`), `network_io_direction`
+(`transmit`/`receive`), `diameter_result_code`, `diameter_error_type`.
 
 For the authoritative description of units, attribute keys, and attribute values
 for each instrument, see the upstream library documentation:
@@ -238,18 +252,30 @@ for each instrument, see the upstream library documentation:
 **Enabled by:** `chf_otel_app` calls `opentelemetry_beam_metrics:setup/0` at
 startup.
 
-The `opentelemetry_beam` library emits metrics in the following categories:
+The `opentelemetry_beam` library in this build emits metrics in the following
+categories (verified against a live `/metrics` scrape):
 
-- Scheduler utilization
-- Memory (total, process, atom, binary, ETS)
-- Run-queue lengths
-- Garbage collection counts and reclaimed words
-- I/O bytes in and out
+- Memory — `beam_memory_allocated_bytes{kind}`, `beam_memory_processes_bytes{usage}`,
+  `beam_memory_system_bytes{usage=atom|binary|ets|code|other}`,
+  `beam_memory_atoms_bytes{usage}`
+- Run-queue lengths — `beam_cpu_scheduler_run_queues_length` (normal),
+  `beam_cpu_dirty_cpu_scheduler_run_queue_length`,
+  `beam_cpu_dirty_io_scheduler_run_queue_length`
+- Scheduler / CPU counts — `beam_cpu_scheduler_count`, `beam_cpu_scheduler_online`,
+  `beam_cpu_logical_processors_*` (counts, **not** a 0–1 utilization ratio)
+- Process / port / table counts — `beam_process_count`, `beam_port_count`,
+  `beam_ets_count`, `beam_atom_count` (plus their `_limit` gauges)
+- Work done — `beam_process_reductions_total`, `beam_port_io_bytes_total`
+- Garbage collection — `beam_memory_garbage_collection_count_total`,
+  `beam_memory_garbage_collection_words_reclaimed_total`,
+  `beam_memory_garbage_collection_bytes_reclaimed_bytes_total`
 
-The exact instrument names, units, and attributes for these metrics are governed
-by the next-nf BEAM VM semantic conventions. Use that branch as the source of
-truth when building dashboards or alerting rules:
-<https://github.com/next-nf/semantic-conventions/tree/add/beam-vm>
+> [!NOTE]
+> This build exposes scheduler/CPU **counts** and run-queue lengths, not a
+> scheduler-utilization ratio. Use `rate(beam_process_reductions_total[…])` as a
+> CPU-work proxy. The authoritative names, units, and attributes are governed by
+> the next-nf BEAM VM semantic conventions:
+> <https://github.com/next-nf/semantic-conventions/tree/add/beam-vm>
 
 > [!NOTE]
 > `opentelemetry_process_propagator` carries OpenTelemetry context across

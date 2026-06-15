@@ -14,7 +14,7 @@ OTP 29+ is required (`{minimum_otp_vsn, "29"}`). rebar3 is the build system. The
 
 ## Architecture
 
-Erlang umbrella application with 7 sub-apps under `apps/`:
+Erlang umbrella application with 8 sub-apps under `apps/`:
 
 | App | Purpose | Deps | Listeners |
 |-----|---------|------|-----------|
@@ -23,10 +23,11 @@ Erlang umbrella application with 7 sub-apps under `apps/`:
 | `chf_diameter` | DIAMETER Gy (Ro) + Rf server interfaces for 4G | chf_core, diameter | TCP :3868 |
 | `chf_sbi` | 5G Nchf_ConvergedCharging + OfflineOnlyCharging REST APIs (TS 32.291) | chf_core, cowboy | HTTP :8443 |
 | `chf_api` | Provisioning REST API (subscribers, balances) | chf_db, cowboy | HTTP :8080 |
-| `chf_web` | Web management UI + Prometheus metrics | chf_core, chf_db, cowboy | HTTP :8081 |
+| `chf_web` | Web management UI + OTEL `/metrics` (OpenTelemetry Prometheus exporter) | chf_core, chf_db, cowboy | HTTP :8081 |
+| `chf_otel` | OpenTelemetry setup: charging instruments + HTTP/Diameter/BEAM metric init | OTEL libs | OTLP → :4318 |
 | `chf` | Top-level app: config, startup logging | all above | - |
 
-Startup order: chf_db -> chf_core -> chf_diameter -> chf_sbi -> chf_api -> chf_web -> chf.
+Startup order: chf_otel -> chf_db -> chf_core -> chf_diameter -> chf_sbi -> chf_api -> chf_web -> chf. (`chf_otel` first so the OTEL instruments + Diameter/BEAM/HTTP metric setup exist before any request; the OpenTelemetry SDK/exporter apps start ahead of it via the release boot order.)
 
 ## Key design decisions
 
