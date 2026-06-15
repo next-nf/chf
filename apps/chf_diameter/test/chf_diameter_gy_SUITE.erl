@@ -55,11 +55,14 @@ all() ->
      ccr_update_success,
      ccr_terminate_success,
      ccr_unknown_error,
-     ccr_initial_insufficient_balance,
+     ccr_initial_credit_limited_grants_zero,
      ccr_update_unknown_session,
      ccr_update_session_terminated,
      ccr_event_request,
-     ccr_initial_multi_mscc].
+     ccr_initial_multi_mscc,
+     ccr_mscc_full_grant_no_fui,
+     ccr_mscc_final_grant_has_fui,
+     ccr_mscc_credit_limit_has_fui_4012].
 
 init_per_suite(Config) ->
     Config.
@@ -136,7 +139,8 @@ call_handler(CCR) ->
 
 ccr_initial_success(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"test-session">>} end),
-    meck:expect(chf_core, session_initial, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 5000000, outcome => granted}}} end),
 
     SessionId = <<"test-session-1">>,
     SubId = make_sub_id_imsi(<<"001010123456789">>),
@@ -177,7 +181,8 @@ ccr_initial_core_error(_Config) ->
     }}, Result).
 
 ccr_update_success(_Config) ->
-    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    meck:expect(chf_core, session_update, fun(_, _) ->
+        {ok, #{1 => #{granted => 5000000, outcome => granted}}} end),
 
     SessionId = <<"test-session-update">>,
     MSCC = make_mscc(1, 10000000, 3000000),
@@ -219,14 +224,18 @@ ccr_unknown_error(_Config) ->
         'Result-Code' = ?DIAMETER_UNABLE_TO_COMPLY
     }}, Result).
 
-ccr_initial_insufficient_balance(_Config) ->
+%% A credit-limited rating group (zero available balance) is no longer a
+%% command-level error: chf_core returns {ok, #{... outcome => credit_limit_reached}}
+%% and the CCA carries command-level SUCCESS with a zero grant. INTERIM — a
+%% later task adds the per-MSCC Final-Unit-Indication verdict; until then the
+%% wire is unchanged from the all-granted case.
+ccr_initial_credit_limited_grants_zero(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
-    meck:expect(chf_core, session_initial, fun(_, _) -> {error, insufficient_balance} end),
-    %% The handler cleans up the orphaned session on an initial failure.
-    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 0, outcome => credit_limit_reached}}} end),
     SubId = make_sub_id_imsi(<<"001010123456789">>),
     CCR = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 100, 0)]),
-    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_CREDIT_LIMIT_REACHED}},
+    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}},
                  call_handler(CCR)).
 
 ccr_update_unknown_session(_Config) ->
@@ -258,7 +267,8 @@ ccr_event_request(_Config) ->
 ccr_initial_multi_mscc(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"multi-session">>} end),
     meck:expect(chf_core, session_initial, fun(_, _) ->
-        {ok, #{1 => 5000000, 2 => 3000000}}
+        {ok, #{1 => #{granted => 5000000, outcome => granted},
+               2 => #{granted => 3000000, outcome => granted}}}
     end),
 
     SessionId = <<"multi-mscc-session">>,
@@ -272,3 +282,53 @@ ccr_initial_multi_mscc(_Config) ->
     ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}}, Result),
     {reply, CCA} = Result,
     ?assertEqual(2, length(CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control')).
+
+%% outcome=granted: MSCC Result-Code=2001, no Final-Unit-Indication, GSU present.
+ccr_mscc_full_grant_no_fui(_Config) ->
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 1000, outcome => granted}}} end),
+    SubId = make_sub_id_imsi(<<"001010123456789">>),
+    CCR   = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 1000, 0)]),
+    {reply, CCA} = call_handler(CCR),
+    ?assertMatch(#diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}, CCA),
+    [MSCC] = CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control',
+    ?assertEqual([?DIAMETER_SUCCESS],              MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Result-Code'),
+    ?assertEqual([],                               MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Final-Unit-Indication'),
+    ?assertEqual([3600],                           MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Validity-Time'),
+    [GSU]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Granted-Service-Unit',
+    ?assertEqual([1000], GSU#'diameter_ro_Granted-Service-Unit'.'CC-Total-Octets').
+
+%% outcome=final_grant: MSCC Result-Code=2001, FUI(TERMINATE) present, GSU present.
+ccr_mscc_final_grant_has_fui(_Config) ->
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 300, outcome => final_grant}}} end),
+    SubId = make_sub_id_imsi(<<"001010123456789">>),
+    CCR   = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 1000, 0)]),
+    {reply, CCA} = call_handler(CCR),
+    ?assertMatch(#diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}, CCA),
+    [MSCC] = CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control',
+    ?assertEqual([?DIAMETER_SUCCESS],              MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Result-Code'),
+    ?assertEqual([3600],                           MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Validity-Time'),
+    [FUI]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Final-Unit-Indication',
+    ?assertEqual([0], FUI#'diameter_ro_Final-Unit-Indication'.'Final-Unit-Action'),
+    [GSU]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Granted-Service-Unit',
+    ?assertEqual([300], GSU#'diameter_ro_Granted-Service-Unit'.'CC-Total-Octets').
+
+%% outcome=credit_limit_reached: MSCC Result-Code=4012, FUI(TERMINATE), GSU absent.
+ccr_mscc_credit_limit_has_fui_4012(_Config) ->
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 0, outcome => credit_limit_reached}}} end),
+    SubId = make_sub_id_imsi(<<"001010123456789">>),
+    CCR   = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 100, 0)]),
+    {reply, CCA} = call_handler(CCR),
+    ?assertMatch(#diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}, CCA),
+    [MSCC] = CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control',
+    ?assertEqual([?DIAMETER_CREDIT_LIMIT_REACHED], MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Result-Code'),
+    %% Validity-Time only scopes an actual grant; omitted on a 4012 MSCC.
+    ?assertEqual([],  MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Validity-Time'),
+    [FUI]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Final-Unit-Indication',
+    ?assertEqual([0], FUI#'diameter_ro_Final-Unit-Indication'.'Final-Unit-Action'),
+    ?assertEqual([],  MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Granted-Service-Unit').

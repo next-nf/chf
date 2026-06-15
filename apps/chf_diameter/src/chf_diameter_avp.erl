@@ -118,21 +118,56 @@ extract_usu_total(USUList) ->
 %%====================================================================
 
 %% @doc Build a list of Multiple-Services-Credit-Control records for a CCA,
-%%      given a map of #{RatingGroupId => GrantedOctets}.
--spec build_mscc_response(#{non_neg_integer() => integer()}) ->
+%%      given an outcome map of #{RatingGroupId => #{granted => Octets, outcome => atom()}}.
+%%
+%% Outcome mapping:
+%%   granted              -> Result-Code=2001, GSU present, Validity-Time, no FUI
+%%   final_grant          -> Result-Code=2001, GSU present, Validity-Time, FUI(TERMINATE)
+%%   credit_limit_reached -> Result-Code=4012, GSU omitted, no Validity-Time, FUI(TERMINATE)
+%%
+%% Validity-Time only scopes an actual grant (RFC 4006 §8.7 / TS 32.299), so it
+%% is emitted only on the granting outcomes and omitted from the 4012 MSCC. It
+%% is read from the chf_diameter application env ({chf_diameter, validity_time}),
+%% defaulting to 3600 seconds.
+%%
+%% 2001 is used as a literal: the generated RO dictionary header defines no
+%% SUCCESS Result-Code macro (its DIAMETER_RO_RESULT-CODE_* series is error
+%% codes only, 4010+).
+-spec build_mscc_response(chf_core:outcome_map()) ->
     [#'diameter_ro_Multiple-Services-Credit-Control'{}].
-build_mscc_response(GrantedMap) ->
-    maps:fold(fun(RGId, GrantedAmount, Acc) ->
-        GSU = #'diameter_ro_Granted-Service-Unit'{
-            'CC-Total-Octets' = [GrantedAmount]
-        },
-        MSCC = #'diameter_ro_Multiple-Services-Credit-Control'{
-            'Rating-Group'         = [RGId],
-            'Granted-Service-Unit' = [GSU],
-            'Validity-Time'        = [3600]   %% 1 hour validity
-        },
-        [MSCC | Acc]
-    end, [], GrantedMap).
+build_mscc_response(OutcomeMap) ->
+    ValidityTime = application:get_env(chf_diameter, validity_time, 3600),
+    maps:fold(fun(RGId, #{granted := Granted, outcome := Outcome}, Acc) ->
+        [build_one_mscc(RGId, Granted, Outcome, ValidityTime) | Acc]
+    end, [], OutcomeMap).
+
+-spec build_one_mscc(non_neg_integer(), non_neg_integer(),
+                     granted | final_grant | credit_limit_reached,
+                     non_neg_integer()) ->
+    #'diameter_ro_Multiple-Services-Credit-Control'{}.
+build_one_mscc(RGId, _Granted, credit_limit_reached, _ValidityTime) ->
+    Base = #'diameter_ro_Multiple-Services-Credit-Control'{
+        'Rating-Group' = [RGId],
+        'Result-Code'  = [?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED']},
+    add_terminate_fui(Base);
+build_one_mscc(RGId, Granted, Outcome, ValidityTime) ->
+    GSU  = #'diameter_ro_Granted-Service-Unit'{'CC-Total-Octets' = [Granted]},
+    Base = #'diameter_ro_Multiple-Services-Credit-Control'{
+        'Rating-Group'         = [RGId],
+        'Granted-Service-Unit' = [GSU],
+        'Validity-Time'        = [ValidityTime],
+        'Result-Code'          = [2001]},
+    case Outcome of
+        granted     -> Base;
+        final_grant -> add_terminate_fui(Base)
+    end.
+
+-spec add_terminate_fui(#'diameter_ro_Multiple-Services-Credit-Control'{}) ->
+    #'diameter_ro_Multiple-Services-Credit-Control'{}.
+add_terminate_fui(MSCC) ->
+    FUI = #'diameter_ro_Final-Unit-Indication'{
+        'Final-Unit-Action' = [?'DIAMETER_RO_FINAL-UNIT-ACTION_TERMINATE']},
+    MSCC#'diameter_ro_Multiple-Services-Credit-Control'{'Final-Unit-Indication' = [FUI]}.
 
 %%====================================================================
 %% Rf helper — extract used units from Service-Information

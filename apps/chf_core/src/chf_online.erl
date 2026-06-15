@@ -26,8 +26,6 @@
 
 -export([initial_request/2, update_request/2, terminate_request/2]).
 
--define(DEFAULT_QUOTA, 10000000).  %% micro-units
-
 %%====================================================================
 %% API
 %%====================================================================
@@ -37,9 +35,12 @@
 %% RatingGroups :: [#{rating_group => non_neg_integer(),
 %%                    requested_units => integer()}]
 %%
-%% Returns {ok, #{RatingGroup => GrantedAmount}} or {error, Reason}.
+%% Returns {ok, #{RatingGroup => #{granted => integer(), outcome => atom()}}}
+%% or {error, Reason}.
 -spec initial_request(Imsi :: binary(), RatingGroups :: [map()]) ->
-    {ok, #{non_neg_integer() => integer()}} | {error, term()}.
+    {ok, #{non_neg_integer() => #{granted => non_neg_integer(),
+                                  outcome => granted | final_grant | credit_limit_reached}}} |
+    {error, term()}.
 initial_request(Imsi, RatingGroups) ->
     case lookup_active_subscriber(Imsi) of
         {ok, Sub} ->
@@ -54,7 +55,9 @@ initial_request(Imsi, RatingGroups) ->
 %%                    used_units    => integer(),
 %%                    requested_units => integer()}]
 -spec update_request(Imsi :: binary(), RatingGroups :: [map()]) ->
-    {ok, #{non_neg_integer() => integer()}} | {error, term()}.
+    {ok, #{non_neg_integer() => #{granted => non_neg_integer(),
+                                  outcome => granted | final_grant | credit_limit_reached}}} |
+    {error, term()}.
 update_request(Imsi, RatingGroups) ->
     case lookup_active_subscriber(Imsi) of
         {ok, Sub} ->
@@ -141,24 +144,37 @@ lookup_active_subscriber(Imsi) ->
             {error, subscriber_not_found}
     end.
 
-%% Reserve quota for each RatingGroup, accumulating granted amounts.
--spec grant_units(#subscriber{}, [map()], #{non_neg_integer() => integer()}) ->
-    {ok, #{non_neg_integer() => integer()}} | {error, term()}.
+%% Reserve quota for each RatingGroup, accumulating per-RG outcome maps.
+%% Never returns {error, _}: balance exhaustion / a missing balance record is
+%% absorbed into the credit_limit_reached outcome (see reserve_rg/2).
+-spec grant_units(#subscriber{}, [map()],
+                  #{non_neg_integer() => #{granted => non_neg_integer(),
+                                           outcome => granted | final_grant | credit_limit_reached}}) ->
+    {ok, #{non_neg_integer() => #{granted => non_neg_integer(),
+                                  outcome => granted | final_grant | credit_limit_reached}}}.
 grant_units(_Sub, [], Acc) ->
     {ok, Acc};
 grant_units(Sub, [RG | Rest], Acc) ->
-    AccountId   = Sub#subscriber.account_id,
-    RGId        = maps:get(rating_group, RG),
-    Requested   = maps:get(requested_units, RG, 0),
-    DefaultQuota = rg_quota(Sub, RGId),
-    GrantAmount  = min(Requested, DefaultQuota),
-    case chf_db:balance_reserve(AccountId, GrantAmount) of
-        {ok, _Balance} ->
-            chf_otel:record_balance_op(reserve, ok),
-            grant_units(Sub, Rest, Acc#{RGId => GrantAmount});
-        {error, Reason} ->
-            chf_otel:record_balance_op(reserve, Reason),
-            {error, Reason}
+    AccountId = Sub#subscriber.account_id,
+    RGId      = maps:get(rating_group, RG),
+    Requested = maps:get(requested_units, RG, 0),
+    Desired   = min(Requested, rg_quota(Sub, RGId)),
+    {Granted, Outcome} = reserve_rg(AccountId, Desired),
+    grant_units(Sub, Rest, Acc#{RGId => #{granted => Granted, outcome => Outcome}}).
+
+-spec reserve_rg(binary(), non_neg_integer()) ->
+    {non_neg_integer(), granted | final_grant | credit_limit_reached}.
+reserve_rg(_AccountId, 0) -> {0, granted};
+reserve_rg(AccountId, Desired) ->
+    case chf_db:balance_reserve_up_to(AccountId, Desired) of
+        {ok, Desired, _}                         -> chf_otel:record_balance_op(reserve, ok),
+                                                    {Desired, granted};
+        {ok, 0, _}                               -> chf_otel:record_balance_op(reserve, credit_limit_reached),
+                                                    {0, credit_limit_reached};
+        {ok, Granted, _} when Granted < Desired  -> chf_otel:record_balance_op(reserve, ok),
+                                                    {Granted, final_grant};
+        {error, not_found}                       -> chf_otel:record_balance_op(reserve, credit_limit_reached),
+                                                    {0, credit_limit_reached}
     end.
 
 %% Commit used units for each RatingGroup.
@@ -182,5 +198,8 @@ rg_quota(Sub, RGId) ->
     RGMap = Sub#subscriber.rating_groups,
     case maps:find(RGId, RGMap) of
         {ok, #{quota := Q}} -> Q;
-        _                   -> ?DEFAULT_QUOTA
+        %% Read from the chf_core app env (chf_online is a module of chf_core,
+        %% not a loaded application — a {chf_online,...} sys.config block would
+        %% be silently ignored).
+        _                   -> application:get_env(chf_core, default_quota, 10000000)
     end.

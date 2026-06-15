@@ -30,6 +30,7 @@
     balance_get/1,
     balance_topup/2,
     balance_reserve/2,
+    balance_reserve_up_to/2,
     balance_commit/2,
     balance_refund/2,
     balance_set_total/2,
@@ -183,6 +184,30 @@ balance_reserve(AccountId, Amount) ->
         end
     end,
     run_balance_txn(F).
+
+-spec balance_reserve_up_to(AccountId :: binary(), Amount :: integer()) ->
+    {ok, non_neg_integer(), #balance{}} | {error, term()}.
+%% A negative amount is invalid — reject it immediately.
+balance_reserve_up_to(_AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
+balance_reserve_up_to(AccountId, Amount) ->
+    F = fun() ->
+        case mnesia:read(balance, AccountId, write) of
+            [] ->
+                mnesia:abort(not_found);
+            [#balance{available = Avail} = B0] ->
+                Granted     = min(Amount, max(0, Avail)),
+                NewReserved = B0#balance.reserved + Granted,
+                B1 = B0#balance{reserved  = NewReserved,
+                                available = B0#balance.total - NewReserved},
+                ok = mnesia:write(B1),
+                {Granted, B1}
+        end
+    end,
+    case activity(F) of
+        {Granted, #balance{} = B1} -> {ok, Granted, B1};
+        {error, _} = Err           -> Err
+    end.
 
 -spec balance_commit(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.

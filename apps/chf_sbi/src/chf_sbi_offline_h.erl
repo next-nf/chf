@@ -117,9 +117,9 @@ handle_create(Body, Req, State) ->
                             {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
                             Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
                             {ok, Req2, State};
-                        {ok, GrantedMap} ->
+                        {ok, OutcomeMap} ->
                             Location = <<"/nchf-offlineonlycharging/v1/offlinechargingdata/", Ref/binary>>,
-                            ResponseBody = build_response(GrantedMap, RatingGroups),
+                            ResponseBody = build_response(OutcomeMap, RatingGroups),
                             Req2 = cowboy_req:reply(201,
                                 #{<<"content-type">> => <<"application/json">>,
                                   <<"location">>      => Location},
@@ -140,8 +140,8 @@ handle_update(Ref, Body, Req, State) ->
             {Status, Title, Detail} = chf_sbi_error:reason_to_problem(Reason),
             Req2 = chf_sbi_error:reply_error(Status, Title, Detail, Req),
             {ok, Req2, State};
-        {ok, GrantedMap} ->
-            ResponseBody = build_response(GrantedMap, RatingGroups),
+        {ok, OutcomeMap} ->
+            ResponseBody = build_response(OutcomeMap, RatingGroups),
             Req2 = cowboy_req:reply(200,
                 #{<<"content-type">> => <<"application/json">>},
                 ResponseBody, Req),
@@ -237,10 +237,16 @@ sum_used_units(List) when is_list(List) ->
 sum_used_units(_) -> 0.
 
 %% Build the OfflineChargingDataResponse body.
-build_response(GrantedMap, RatingGroups) ->
+%%
+%% OutcomeMap :: #{RatingGroupId => #{granted => integer(), outcome => atom()}}
+%%               or #{} for offline sessions.
+build_response(OutcomeMap, RatingGroups) ->
     MUI = lists:map(fun(RG) ->
         RGId    = maps:get(rating_group, RG, 0),
-        Granted = maps:get(RGId, GrantedMap, 0),
+        Granted = case maps:get(RGId, OutcomeMap, undefined) of
+                      #{granted := G} -> G;
+                      _               -> 0
+                  end,
         #{<<"ratingGroup">>  => RGId,
           <<"grantedUnit">>  => #{<<"totalVolume">> => Granted},
           <<"resultCode">>   => 2001,

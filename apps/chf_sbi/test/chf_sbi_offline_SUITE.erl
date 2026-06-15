@@ -148,7 +148,7 @@ release_session_terminated(Config) ->
 %% Content-Type: application/json; the handler should return 415 on mismatch.
 wrong_content_type(Config) ->
     ConnPid = ?config(conn, Config),
-    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 0}} end),
+    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{}} end),
     Body = json:encode(#{<<"multipleUnitUsage">> => []}),
     Headers = [{<<"content-type">>, <<"text/plain">>}],
     StreamRef = gun:post(ConnPid,
@@ -163,7 +163,9 @@ wrong_content_type(Config) ->
 create_session_success(Config) ->
     ConnPid = ?config(conn, Config),
     meck:expect(chf_core, create_session, fun(_) -> {ok, <<"test-session-offline-1">>} end),
-    meck:expect(chf_core, session_initial, fun(_, _) -> {ok, #{1 => 0}} end),
+    %% Offline-only sessions do no online grant processing; chf_core returns
+    %% an empty outcome map (the handler fills 0 grants for requested RGs).
+    meck:expect(chf_core, session_initial, fun(_, _) -> {ok, #{}} end),
 
     Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>},
              <<"multipleUnitUsage">>    => [
@@ -182,7 +184,8 @@ create_session_success(Config) ->
 
 update_session_success(Config) ->
     ConnPid = ?config(conn, Config),
-    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 0}} end),
+    %% Offline-only sessions do no online grant processing — empty outcome map.
+    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{}} end),
 
     Body = #{<<"multipleUnitUsage">> => [
         #{<<"ratingGroup">>         => 1,
