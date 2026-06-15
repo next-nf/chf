@@ -295,6 +295,7 @@ ccr_mscc_full_grant_no_fui(_Config) ->
     [MSCC] = CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control',
     ?assertEqual([?DIAMETER_SUCCESS],              MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Result-Code'),
     ?assertEqual([],                               MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Final-Unit-Indication'),
+    ?assertEqual([3600],                           MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Validity-Time'),
     [GSU]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Granted-Service-Unit',
     ?assertEqual([1000], GSU#'diameter_ro_Granted-Service-Unit'.'CC-Total-Octets').
 
@@ -309,6 +310,7 @@ ccr_mscc_final_grant_has_fui(_Config) ->
     ?assertMatch(#diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}, CCA),
     [MSCC] = CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control',
     ?assertEqual([?DIAMETER_SUCCESS],              MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Result-Code'),
+    ?assertEqual([3600],                           MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Validity-Time'),
     [FUI]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Final-Unit-Indication',
     ?assertEqual([0], FUI#'diameter_ro_Final-Unit-Indication'.'Final-Unit-Action'),
     [GSU]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Granted-Service-Unit',
@@ -325,6 +327,8 @@ ccr_mscc_credit_limit_has_fui_4012(_Config) ->
     ?assertMatch(#diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}, CCA),
     [MSCC] = CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control',
     ?assertEqual([?DIAMETER_CREDIT_LIMIT_REACHED], MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Result-Code'),
+    %% Validity-Time only scopes an actual grant; omitted on a 4012 MSCC.
+    ?assertEqual([],  MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Validity-Time'),
     [FUI]  = MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Final-Unit-Indication',
     ?assertEqual([0], FUI#'diameter_ro_Final-Unit-Indication'.'Final-Unit-Action'),
     ?assertEqual([],  MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Granted-Service-Unit').
