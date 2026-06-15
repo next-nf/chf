@@ -38,8 +38,8 @@ start(_StartType, _StartArgs) ->
             {"/api/subscribers",                 chf_web_subscriber_h,  []},
             {"/api/subscribers/:imsi",           chf_web_subscriber_h,  []},
 
-            %% Prometheus metrics
-            {"/metrics", prometheus_cowboy_handler, []}
+            %% OTEL-sourced Prometheus metrics (pull reader -> text exposition)
+            {"/metrics", chf_web_metrics_h, []}
         ]}
     ]),
     {ok, _} = cowboy:start_clear(chf_web_listener,
