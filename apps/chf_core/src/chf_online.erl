@@ -198,5 +198,8 @@ rg_quota(Sub, RGId) ->
     RGMap = Sub#subscriber.rating_groups,
     case maps:find(RGId, RGMap) of
         {ok, #{quota := Q}} -> Q;
-        _                   -> application:get_env(chf_online, default_quota, 10000000)
+        %% Read from the chf_core app env (chf_online is a module of chf_core,
+        %% not a loaded application — a {chf_online,...} sys.config block would
+        %% be silently ignored).
+        _                   -> application:get_env(chf_core, default_quota, 10000000)
     end.

@@ -8,12 +8,13 @@
 
 This document covers every operator-tunable parameter and every network listener
 for the CHF (Combined Charging Function) umbrella application. The CHF comprises
-seven OTP applications — `chf_db`, `chf_core`, `chf_diameter`, `chf_sbi`,
-`chf_api`, `chf_web`, and `chf` — each with its own configuration key in
-`config/sys.config`. The online-charging engine reads its settings under a
-separate `chf_online` configuration namespace (the module
-`chf_core/src/chf_online.erl`, not a standalone OTP application). Observability
-settings (OpenTelemetry SDK and exporter) are also covered here.
+eight OTP applications — `chf_db`, `chf_core`, `chf_diameter`, `chf_sbi`,
+`chf_api`, `chf_web`, `chf_otel`, and `chf`. Seven of them take a configuration
+key of the same name in `config/sys.config`; `chf_otel` is configured instead
+through the `opentelemetry` and `opentelemetry_exporter` keys (see the
+Observability section). The online-charging engine (`chf_core/src/chf_online.erl`)
+is a module of `chf_core`, not a standalone application, so its `default_quota`
+setting lives under the `chf_core` key.
 
 Out of scope: the content and semantics of individual metrics are documented in
 [`METRICS.md`](../METRICS.md). Interface contracts (DIAMETER Gy/Rf message
@@ -59,10 +60,7 @@ The file is structured as a list of `{Application, Parameters}` tuples:
   ]},
 
  {chf_core, [
-    {session_idle_timeout, 300000}
-  ]},
-
- {chf_online, [
+    {session_idle_timeout, 300000},
     {default_quota, 10000000}
   ]},
 
@@ -151,7 +149,11 @@ loopback (`127.0.0.1`).
 > `sweep_interval` is not present in the default `sys.config`; the code default
 > of 60 000 ms (1 minute) applies unless the key is added.
 
-### 4.4 `chf_online` parameters
+### 4.4 `chf_core` — online-engine parameter (`default_quota`)
+
+This setting belongs to the online-charging engine (`chf_online.erl`) but is read
+from the **`chf_core`** application key, since `chf_online` is a module of
+`chf_core` rather than a standalone application.
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -329,8 +331,8 @@ absent (zero granted units are not encoded). The command-level response remains
 success.
 
 **`default_quota` interaction:** When the subscriber record carries no
-per-rating-group quota, the engine uses `chf_online.default_quota` as the grant
-ceiling. If the subscriber's balance exceeds `default_quota`, a full grant of
+per-rating-group quota, the engine uses the `chf_core` `default_quota` setting as
+the grant ceiling. If the subscriber's balance exceeds `default_quota`, a full grant of
 `default_quota` units is issued with no FUI. If the balance is between zero and
 `default_quota`, a partial grant with FUI is issued.
 
