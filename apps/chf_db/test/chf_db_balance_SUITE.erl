@@ -31,7 +31,12 @@ all() ->
      commit_never_exceeds_reserved,
      refund_never_exceeds_reserved,
      invariant_holds_after_ops,
-     set_total_is_absolute_and_atomic].
+     set_total_is_absolute_and_atomic,
+     reserve_up_to_full,
+     reserve_up_to_partial,
+     reserve_up_to_zero_available,
+     reserve_up_to_missing_account,
+     reserve_up_to_negative_rejected].
 
 init_per_testcase(_TC, Config) ->
     setup_mnesia(),
@@ -121,6 +126,36 @@ invariant_holds_after_ops(_) ->
     true = B#balance.total >= 0,
     true = B#balance.reserved >= 0,
     true = B#balance.available >= 0.
+
+reserve_up_to_full(_) ->
+    ok = seed_balance(<<"acc">>, 1000, 0),
+    {ok, Granted, B} = chf_db:balance_reserve_up_to(<<"acc">>, 400),
+    ?assertEqual(400, Granted),
+    ?assertEqual(400, B#balance.reserved),
+    ?assertEqual(600, B#balance.available).
+
+reserve_up_to_partial(_) ->
+    ok = seed_balance(<<"acc">>, 300, 0),
+    {ok, Granted, B} = chf_db:balance_reserve_up_to(<<"acc">>, 1000),
+    ?assertEqual(300, Granted),
+    ?assertEqual(300, B#balance.reserved),
+    ?assertEqual(0, B#balance.available).
+
+reserve_up_to_zero_available(_) ->
+    ok = seed_balance(<<"acc">>, 100, 100),
+    {ok, Granted, B} = chf_db:balance_reserve_up_to(<<"acc">>, 500),
+    ?assertEqual(0, Granted),
+    ?assertEqual(100, B#balance.reserved),
+    ?assertEqual(0, B#balance.available).
+
+reserve_up_to_missing_account(_) ->
+    ?assertEqual({error, not_found},
+                 chf_db:balance_reserve_up_to(<<"missing">>, 100)).
+
+reserve_up_to_negative_rejected(_) ->
+    ok = seed_balance(<<"acc">>, 100, 0),
+    ?assertEqual({error, invalid_amount},
+                 chf_db:balance_reserve_up_to(<<"acc">>, -5)).
 
 set_total_is_absolute_and_atomic(_) ->
     ok = seed_balance(<<"acc">>, 100, 30),

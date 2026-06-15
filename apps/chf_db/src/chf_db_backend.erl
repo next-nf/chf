@@ -56,6 +56,10 @@
 %% Reserve Amount: available must be >= Amount; decrement available, increment reserved.
 -callback balance_reserve(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
+%% Reserve up to Amount: grants min(Amount, available); never fails due to insufficient balance.
+-callback balance_reserve_up_to(AccountId :: binary(), Amount :: integer()) ->
+    {ok, Granted :: non_neg_integer(), Balance :: term()} | {error, term()}.
+
 %% Commit actual spend of Amount against reserved funds; decrement reserved.
 -callback balance_commit(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 

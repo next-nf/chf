@@ -37,6 +37,7 @@
     balance_get/1,
     balance_topup/2,
     balance_reserve/2,
+    balance_reserve_up_to/2,
     balance_commit/2,
     balance_refund/2,
     balance_set_total/2,
@@ -102,6 +103,11 @@ balance_topup(AccountId, Amount) ->
     {ok, #balance{}} | {error, term()}.
 balance_reserve(AccountId, Amount) ->
     (backend()):balance_reserve(AccountId, Amount).
+
+-spec balance_reserve_up_to(AccountId :: binary(), Amount :: integer()) ->
+    {ok, non_neg_integer(), #balance{}} | {error, term()}.
+balance_reserve_up_to(AccountId, Amount) ->
+    (backend()):balance_reserve_up_to(AccountId, Amount).
 
 -spec balance_commit(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.
