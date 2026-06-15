@@ -2,7 +2,7 @@
 
 # Configuration Reference: CHF
 
-**Applies to:** chf 0.1.0 and later · **Revised:** 2026-06-15
+**Applies to:** chf 0.1.0 and later · **Revised:** 2026-06-16
 
 ## 1. Scope
 
@@ -10,8 +10,10 @@ This document covers every operator-tunable parameter and every network listener
 for the CHF (Combined Charging Function) umbrella application. The CHF comprises
 seven OTP applications — `chf_db`, `chf_core`, `chf_diameter`, `chf_sbi`,
 `chf_api`, `chf_web`, and `chf` — each with its own configuration key in
-`config/sys.config`. Observability settings (OpenTelemetry SDK and exporter) are
-also covered here.
+`config/sys.config`. The online-charging engine reads its settings under a
+separate `chf_online` configuration namespace (the module
+`chf_core/src/chf_online.erl`, not a standalone OTP application). Observability
+settings (OpenTelemetry SDK and exporter) are also covered here.
 
 Out of scope: the content and semantics of individual metrics are documented in
 [`METRICS.md`](../METRICS.md). Interface contracts (DIAMETER Gy/Rf message
@@ -60,15 +62,21 @@ The file is structured as a list of `{Application, Parameters}` tuples:
     {session_idle_timeout, 300000}
   ]},
 
+ {chf_online, [
+    {default_quota, 10000000}
+  ]},
+
  {chf_diameter, [
     {origin_host,  "chf.epc.mnc001.mcc001.3gppnetwork.org"},
     {origin_realm, "epc.mnc001.mcc001.3gppnetwork.org"},
-    {listen, [{tcp, {127,0,0,1}, 3868}]}
+    {listen, [{tcp, {127,0,0,1}, 3868}]},
+    {validity_time, 3600}
   ]},
 
  {chf_sbi, [
     {port, 8443},
-    {ip, {127,0,0,1}}
+    {ip, {127,0,0,1}},
+    {validity_time, 3600}
   ]},
 
  {chf_api, [
@@ -143,13 +151,20 @@ loopback (`127.0.0.1`).
 > `sweep_interval` is not present in the default `sys.config`; the code default
 > of 60 000 ms (1 minute) applies unless the key is added.
 
-### 4.4 `chf_diameter` parameters
+### 4.4 `chf_online` parameters
+
+| Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `default_quota` | integer | `10000000` | 1 – 2<sup>63</sup>−1 | micro-units | Per-RG grant ceiling used when the subscriber has no per-rating-group quota configured. | Sets the maximum units granted in a single credit-control grant when no subscriber-specific quota is configured. Reducing this value causes more frequent update cycles; increasing it reduces signalling load at the cost of larger outstanding reservations. | 0.2.0 |
+
+### 4.5 `chf_diameter` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `origin_host` | string | `"chf.local"` | any DiameterIdentity (FQDN) | — | DIAMETER identity this node presents to peers in the Origin-Host AVP of every message. | Peers match this against their configured Destination-Host or Origin-Host allowlists. | 0.1.0 |
 | `origin_realm` | string | `"local"` | any DIAMETER realm (FQDN) | — | DIAMETER realm this node belongs to, carried in Origin-Realm AVP. | Used for realm-based routing by DIAMETER peers. | 0.1.0 |
 | `listen` | list of `{tcp, ip4_address, port}` | `[{tcp,{0,0,0,0},3868}]` | one or more listener tuples | port | Transport endpoints the DIAMETER service binds. | Determines which addresses and ports accept inbound DIAMETER connections from peers (SMF, PCEF). | 0.1.0 |
+| `validity_time` | integer | `3600` | 1 – 2<sup>31</sup>−1 | seconds | Validity-Time set on Gy CCA Multiple-Services-Credit-Control grants. | Controls how long the peer (SMF/PCEF) may use the granted units before it must send a CCR-Update. Shorter values increase signalling frequency; longer values reduce signalling at the cost of slower balance reconciliation. | 0.2.0 |
 
 > [!NOTE]
 > The code-level default for `listen` is `[{tcp,{0,0,0,0},3868}]` (all
@@ -158,28 +173,29 @@ loopback (`127.0.0.1`).
 > experience. Operators `should` set an explicit routable address rather than
 > binding to `{0,0,0,0}` in production.
 
-### 4.5 `chf_sbi` parameters
+### 4.6 `chf_sbi` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `port` | integer | `8443` | 1–65535 | port | TCP port the Nchf SBI HTTP listener binds. | Determines the port on which 5G SBI clients (AMF, SMF) connect. | 0.1.0 |
 | `ip` | ip4_address (4-tuple) | `{127,0,0,1}` | any valid IPv4 address | — | IP address the Nchf SBI listener binds. | Determines which network interface accepts SBI connections. | 0.1.0 |
+| `validity_time` | integer | `3600` | 1 – 2<sup>31</sup>−1 | seconds | `validityTime` in the converged-charging `multipleUnitInformation` grants. | Controls the duration the SMF/NF consumer may use granted units before issuing an `Update` request. | 0.2.0 |
 
-### 4.6 `chf_api` parameters
+### 4.7 `chf_api` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `port` | integer | `8080` | 1–65535 | port | TCP port the provisioning REST API listener binds. | Determines the port on which operators and provisioning systems connect. | 0.1.0 |
 | `ip` | ip4_address (4-tuple) | `{127,0,0,1}` | any valid IPv4 address | — | IP address the provisioning API listener binds. | Determines which network interface accepts provisioning connections. | 0.1.0 |
 
-### 4.7 `chf_web` parameters
+### 4.8 `chf_web` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `port` | integer | `8081` | 1–65535 | port | TCP port the web UI and metrics listener binds. | Determines the port on which the management dashboard and the Prometheus scrape endpoint (`GET /metrics`) are accessible. | 0.1.0 |
 | `ip` | ip4_address (4-tuple) | `{127,0,0,1}` | any valid IPv4 address | — | IP address the web UI listener binds. | Determines which network interface accepts connections to the dashboard and metrics endpoint. | 0.1.0 |
 
-### 4.8 `opentelemetry` parameters
+### 4.9 `opentelemetry` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -187,14 +203,14 @@ loopback (`127.0.0.1`).
 | `traces_exporter` | atom | `none` | `none`, `otlp` | — | Exporter for distributed traces. `none` disables trace export; `otlp` exports via the endpoint configured in `opentelemetry_exporter`. | When `none`, no trace data is sent to the collector; spans are still created and can be inspected in-process. | 0.1.0 |
 | `resource` | map | `#{service => #{name => <<"chf">>}}` | an OTel resource map | — | Resource attributes attached to every span and metric. The `service.name` attribute identifies this node in a collector or UI. | All exported telemetry carries these attributes; changing `service.name` affects how the data appears in Jaeger, Grafana, and similar tools. | 0.1.0 |
 
-### 4.9 `opentelemetry_exporter` parameters
+### 4.10 `opentelemetry_exporter` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `otlp_protocol` | atom | `http_protobuf` | `http_protobuf`, `grpc` | — | Wire protocol used to push telemetry to the OTLP collector. | Determines the serialisation format and transport used for export. | 0.1.0 |
 | `otlp_endpoint` | string | `"http://localhost:4318"` | any HTTP or HTTPS URL | — | Base URL of the OTLP collector to which traces and metrics are pushed. The exporter appends `/v1/traces` or `/v1/metrics` as appropriate. | All OTLP push export goes to this address. Change this to point at a local collector sidecar (e.g. OpenTelemetry Collector) or a hosted endpoint (e.g. Grafana Cloud). | 0.1.0 |
 
-### 4.10 `opentelemetry_experimental` metric readers
+### 4.11 `opentelemetry_experimental` metric readers
 
 Two metric readers are configured. Both are specified under the `readers` key:
 
@@ -280,6 +296,43 @@ setting. Metric export (via `otel_metric_reader`) is independent of
 > Running an OpenTelemetry Collector sidecar on `localhost:4318` is the
 > recommended deployment pattern. The Collector can then fan out to Jaeger
 > (traces), Prometheus remote-write, or a managed observability backend.
+
+### 5.6 Partial grants and Final-Unit-Indication
+
+When the charging engine processes a credit-control request and the subscriber's
+available balance is less than the requested volume, it issues a partial grant
+rather than refusing the request outright. The partial grant carries a
+Final-Unit-Indication (FUI) signalling that the granted units are the last
+available.
+
+**On the Gy interface (DIAMETER):** A partial grant is encoded in the CCA as a
+Multiple-Services-Credit-Control AVP with the Granted-Service-Unit reflecting
+the actual available balance and a Final-Unit-Indication AVP with
+Final-Unit-Action set to `TERMINATE`. The CCA Result-Code is `2001
+DIAMETER_SUCCESS`; the FUI is carried at the MSCC level, not at the
+command level.
+
+**On the Nchf SBI interface (HTTP):** A partial grant is encoded in the
+`multipleUnitInformation` element with `grantedUnit` reflecting the available
+balance and `finalUnitIndication` with action `TERMINATE`. The HTTP response
+status is `201 Created` for an initial request or `200 OK` for an update; the
+FUI is carried in the charge-data body, not as an error status.
+
+**Zero-balance condition:** When available balance is zero at the time of a
+request, the engine issues no grant for that Rating Group. On Gy, the MSCC
+carries a Result-Code of `4012 DIAMETER_CREDIT_LIMIT_REACHED` and a
+Final-Unit-Indication with action `TERMINATE`. On Nchf SBI, the
+`multipleUnitInformation` element carries `resultCode` `4012` (the integer
+3GPP Result-Code for `CREDIT_LIMIT_REACHED`) and `finalUnitIndication` with
+action `TERMINATE`. In both cases the grant is
+absent (zero granted units are not encoded). The command-level response remains
+success.
+
+**`default_quota` interaction:** When the subscriber record carries no
+per-rating-group quota, the engine uses `chf_online.default_quota` as the grant
+ceiling. If the subscriber's balance exceeds `default_quota`, a full grant of
+`default_quota` units is issued with no FUI. If the balance is between zero and
+`default_quota`, a partial grant with FUI is issued.
 
 ## 6. Example
 
