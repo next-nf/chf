@@ -24,6 +24,11 @@
 
 -export([start/2, stop/1]).
 
+%% start/2 calls chf_otel:setup_metrics/0, whose success typing is none() purely
+%% because of the experimental OTEL get_meter/1 contract (see chf_otel). That
+%% propagates a spurious "no local return" here and makes safe_setup/2 look dead.
+-dialyzer({nowarn_function, [start/2, safe_setup/2]}).
+
 start(_StartType, _StartArgs) ->
     ok = chf_otel:setup_metrics(),
     %% Best-effort one-time setup of the library instruments. These must never

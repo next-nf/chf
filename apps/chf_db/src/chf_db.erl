@@ -126,7 +126,7 @@ balance_set_total(AccountId, NewTotal) ->
 cdr_write(Cdr) ->
     (backend()):cdr_write(Cdr).
 
--spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]}.
+-spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]} | {error, term()}.
 cdr_list(Filters) ->
     (backend()):cdr_list(Filters).
 

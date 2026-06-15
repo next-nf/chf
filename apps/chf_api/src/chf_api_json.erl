@@ -95,13 +95,13 @@ encode_balance(#balance{
 
 %% Convert #{integer() => rating_group_config()} to #{binary() => map()}
 %% so that json:encode/1 can handle it (map keys must be binaries/atoms/integers).
+%% The subscriber record's rating_groups field is always a map, so no
+%% non-map fallback clause is needed (it would be unreachable).
 encode_rating_groups(RatingGroups) when is_map(RatingGroups) ->
     maps:fold(fun(RgId, Config, Acc) ->
         Key = integer_to_binary(RgId),
         Acc#{Key => encode_rg_config(Config)}
-    end, #{}, RatingGroups);
-encode_rating_groups(_) ->
-    #{}.
+    end, #{}, RatingGroups).
 
 encode_rg_config(Config) when is_map(Config) ->
     %% Config may contain quota and/or priority — both integers.

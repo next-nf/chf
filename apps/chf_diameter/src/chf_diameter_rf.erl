@@ -146,7 +146,6 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_INTERIM_RECORD', SessionId, _Ims
     ReqData = #{rating_groups => UsedRGs},
     case chf_core:session_update(SessionId, ReqData) of
         {ok, _} -> ok;
-        ok      -> ok;
         {error, Reason} ->
             ?LOG_WARNING("Rf INTERIM failed session=~s reason=~p",
                          [SessionId, Reason]),
@@ -203,11 +202,11 @@ handle_acr(RecordType, SessionId, _Imsi, _UsedRGs) ->
 %%====================================================================
 
 build_aca(SessionId, OriginHost, OriginRealm, RecordType, RecordNum, Result) ->
+    %% handle_acr/4 returns ok | {error, Code}.
     ResultCode =
         case Result of
-            ok              -> ?'DIAMETER_BASE_RESULT-CODE_SUCCESS';
-            {ok, _}         -> ?'DIAMETER_BASE_RESULT-CODE_SUCCESS';
-            {error, Code}   -> Code
+            ok            -> ?'DIAMETER_BASE_RESULT-CODE_SUCCESS';
+            {error, Code} -> Code
         end,
     chf_otel:record_charging_outcome(rf, rf_outcome_atom(Result)),
     #diameter_rf_ACA{
@@ -219,9 +218,8 @@ build_aca(SessionId, OriginHost, OriginRealm, RecordType, RecordNum, Result) ->
         'Accounting-Record-Number' = RecordNum
     }.
 
-%% map the charging result to a metric-friendly outcome atom
+%% map the charging result (ok | {error, Code}) to a metric-friendly outcome atom
 rf_outcome_atom(ok)                                                        -> success;
-rf_outcome_atom({ok, _})                                                   -> success;
 rf_outcome_atom({error, ?'RESULT-CODE_USER_UNKNOWN'})                      -> user_unknown;
 rf_outcome_atom({error, ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID'})  -> unknown_session;
 rf_outcome_atom({error, _})                                                -> unable_to_comply.
