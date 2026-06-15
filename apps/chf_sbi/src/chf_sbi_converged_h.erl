@@ -243,25 +243,42 @@ sum_used_units(_) -> 0.
 
 %% Build the ChargingDataResponse body.
 %%
-%% OutcomeMap :: #{RatingGroupId => #{granted => integer(), outcome => atom()}}
+%% OutcomeMap :: chf_core:outcome_map() — #{RGId => #{granted => integer(), outcome => atom()}}
 %%               from chf_core (online/converged) or #{} (offline).
 %% RatingGroups :: [#{rating_group => id(), ...}] — the parsed request groups.
 %%
 %% We produce multipleUnitInformation for every requested rating group,
-%% falling back to 0 if the session did not grant anything for that group.
+%% using resultCode 4012 + finalUnitIndication(TERMINATE) on credit_limit_reached,
+%% finalUnitIndication(TERMINATE) on final_grant, and omitting grantedUnit when zero.
+-spec build_response(chf_core:outcome_map(), [map()]) -> iodata().
 build_response(OutcomeMap, RatingGroups) ->
+    ValidityTime = application:get_env(chf_sbi, validity_time, 3600),
     MUI = lists:map(fun(RG) ->
-        RGId    = maps:get(rating_group, RG, 0),
-        Granted = case maps:get(RGId, OutcomeMap, undefined) of
-                      #{granted := G} -> G;
-                      _               -> 0
-                  end,
-        #{<<"ratingGroup">>  => RGId,
-          <<"grantedUnit">>  => #{<<"totalVolume">> => Granted},
-          <<"resultCode">>   => 2001,
-          <<"validityTime">> => 3600}
+        RGId = maps:get(rating_group, RG, 0),
+        {Granted, Outcome} =
+            case maps:get(RGId, OutcomeMap, undefined) of
+                #{granted := G, outcome := O} -> {G, O};
+                _                             -> {0, credit_limit_reached}
+            end,
+        mui_entry(RGId, Granted, Outcome, ValidityTime)
     end, RatingGroups),
     chf_sbi_json:encode(#{<<"multipleUnitInformation">> => MUI}).
+
+-spec mui_entry(non_neg_integer(), non_neg_integer(), atom(), pos_integer()) -> map().
+mui_entry(RGId, Granted, Outcome, ValidityTime) ->
+    ResultCode = case Outcome of credit_limit_reached -> 4012; _ -> 2001 end,
+    Base = #{<<"ratingGroup">>  => RGId,
+             <<"resultCode">>   => ResultCode,
+             <<"validityTime">> => ValidityTime},
+    WithGrant = case Granted > 0 of
+                    true  -> Base#{<<"grantedUnit">> => #{<<"totalVolume">> => Granted}};
+                    false -> Base
+                end,
+    case Outcome of
+        granted -> WithGrant;
+        _       -> WithGrant#{<<"finalUnitIndication">> =>
+                                  #{<<"finalUnitAction">> => <<"TERMINATE">>}}
+    end.
 
 %% Generate a unique chargingDataRef.
 generate_ref() -> chf_sbi_util:generate_ref().

@@ -38,7 +38,9 @@ all() ->
      release_session_terminated,
      wrong_content_type,
      create_insufficient_balance_403,
-     update_large_body_413].
+     update_large_body_413,
+     converged_response_final_unit_indication,
+     converged_response_full_grant_no_fui].
 
 init_per_suite(Config) ->
     %% Start cowboy and ranch if not already running.
@@ -246,9 +248,40 @@ update_large_body_413(Config) ->
     {response, _, Status, _} = gun:await(ConnPid, StreamRef),
     ?assertEqual(413, Status).
 
+converged_response_final_unit_indication(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 0, outcome => credit_limit_reached}}} end),
+    Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>},
+             <<"multipleUnitUsage">> => [#{<<"ratingGroup">> => 1,
+                                           <<"requestedUnit">> => #{<<"totalVolume">> => 1000}}]},
+    {201, _H, RespBody} = post_json(ConnPid, "/nchf-convergedcharging/v3/chargingdata", Body),
+    #{<<"multipleUnitInformation">> := [MUI]} = decode(RespBody),
+    ?assertEqual(4012, maps:get(<<"resultCode">>, MUI)),
+    ?assertEqual(<<"TERMINATE">>,
+                 maps:get(<<"finalUnitAction">>, maps:get(<<"finalUnitIndication">>, MUI))),
+    ?assertNot(maps:is_key(<<"grantedUnit">>, MUI)).
+
+converged_response_full_grant_no_fui(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => #{granted => 1000, outcome => granted}}} end),
+    Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>},
+             <<"multipleUnitUsage">> => [#{<<"ratingGroup">> => 1,
+                                           <<"requestedUnit">> => #{<<"totalVolume">> => 1000}}]},
+    {201, _H, RespBody} = post_json(ConnPid, "/nchf-convergedcharging/v3/chargingdata", Body),
+    #{<<"multipleUnitInformation">> := [MUI]} = decode(RespBody),
+    ?assertEqual(2001, maps:get(<<"resultCode">>, MUI)),
+    ?assertNot(maps:is_key(<<"finalUnitIndication">>, MUI)),
+    ?assertEqual(1000, maps:get(<<"totalVolume">>, maps:get(<<"grantedUnit">>, MUI))).
+
 %%====================================================================
 %% Internal helpers
 %%====================================================================
+
+decode(Bin) -> chf_sbi_json:decode(Bin).
 
 post_json(ConnPid, Path, Body) ->
     Headers = [{<<"content-type">>, <<"application/json">>}],
