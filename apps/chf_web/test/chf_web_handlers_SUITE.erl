@@ -51,7 +51,7 @@ all() ->
      web_subscriber_get_existing,
      web_subscriber_get_not_found,
      web_subscriber_post_creates,
-     web_subscriber_post_no_balance_init,
+     web_subscriber_post_initialises_balance,
      web_subscriber_post_missing_field,
      web_subscriber_method_not_allowed,
      %% metrics
@@ -360,18 +360,19 @@ web_subscriber_post_creates(Config) ->
 %% has no balance row. The GET response therefore returns no "balance" key (the
 %% handler checks balance_get and, when not_found, returns undefined and omits
 %% the key from the JSON map — see subscriber_to_map/2).
-web_subscriber_post_no_balance_init(Config) ->
+web_subscriber_post_initialises_balance(Config) ->
     ConnPid = ?config(conn, Config),
     Body = #{<<"imsi">> => <<"001010333333333">>,
              <<"msisdn">> => <<"4933333">>,
              <<"account_id">> => <<"acc-web-3">>},
     {201, _H, _} = post_json(ConnPid, "/api/subscribers", Body),
-    %% Fetch the newly created subscriber via GET and check balance.
+    %% A web-created subscriber must have a zero balance row (matching chf_api),
+    %% so it is immediately chargeable instead of failing with
+    %% insufficient_balance on the first charging request.
     {200, _H2, GetBody} = get(ConnPid, "/api/subscribers/001010333333333"),
     Map = decode(GetBody),
-    %% BUG: the balance key is absent (no balance row was created).
-    %% Expected (correct) behaviour: <<"balance">> key present with total=0.
-    ?assertNot(maps:is_key(<<"balance">>, Map)).
+    ?assert(maps:is_key(<<"balance">>, Map)),
+    ?assertEqual(0, maps:get(<<"total">>, maps:get(<<"balance">>, Map))).
 
 web_subscriber_post_missing_field(Config) ->
     ConnPid = ?config(conn, Config),
