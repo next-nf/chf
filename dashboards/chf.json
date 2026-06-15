@@ -405,8 +405,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (service) (rate(diameter_message_count_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "messages / {{service}}",
+          "expr": "sum by (diameter_command_name, message_direction) (rate(diameter_message_count_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{diameter_command_name}} {{message_direction}}",
           "refId": "A"
         }
       ],
@@ -437,8 +437,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (service) (rate(diameter_error_count_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "errors / {{service}}",
+          "expr": "sum by (diameter_command_name, diameter_error_type) (rate(diameter_error_count_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{diameter_command_name}} / {{diameter_error_type}}",
           "refId": "A"
         }
       ],
@@ -476,8 +476,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (service) (diameter_connection_count{job=~\"$job\",instance=~\"$instance\"})",
-          "legendFormat": "{{service}}",
+          "expr": "sum by (diameter_service_name) (diameter_connection_count{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "{{diameter_service_name}}",
           "refId": "A"
         }
       ],
@@ -507,8 +507,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (direction) (rate(diameter_connection_io_bytes_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{direction}}",
+          "expr": "sum by (network_io_direction) (rate(diameter_connection_io_bytes_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{network_io_direction}}",
           "refId": "A"
         }
       ],
@@ -524,7 +524,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "description": "BEAM memory breakdown: total, process heap, binary, atom, and ETS tables. Steady growth in process or binary memory can indicate a leak.",
+      "description": "BEAM memory breakdown: total allocated, process heap, and the binary / ETS / atom slices of system memory. Steady growth in process or binary memory can indicate a leak.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -545,32 +545,32 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "beam_memory_total_bytes{job=~\"$job\",instance=~\"$instance\"}",
-          "legendFormat": "total",
+          "expr": "sum(beam_memory_allocated_bytes{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "total allocated",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "beam_memory_processes_bytes{job=~\"$job\",instance=~\"$instance\"}",
-          "legendFormat": "processes",
+          "expr": "beam_memory_processes_bytes{job=~\"$job\",instance=~\"$instance\",usage=\"used\"}",
+          "legendFormat": "processes (used)",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "beam_memory_binary_bytes{job=~\"$job\",instance=~\"$instance\"}",
+          "expr": "beam_memory_system_bytes{job=~\"$job\",instance=~\"$instance\",usage=\"binary\"}",
           "legendFormat": "binary",
           "refId": "C"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "beam_memory_atom_bytes{job=~\"$job\",instance=~\"$instance\"}",
-          "legendFormat": "atom",
+          "expr": "beam_memory_system_bytes{job=~\"$job\",instance=~\"$instance\",usage=\"ets\"}",
+          "legendFormat": "ets",
           "refId": "D"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "beam_memory_ets_bytes{job=~\"$job\",instance=~\"$instance\"}",
-          "legendFormat": "ets",
+          "expr": "beam_memory_system_bytes{job=~\"$job\",instance=~\"$instance\",usage=\"atom\"}",
+          "legendFormat": "atom",
           "refId": "E"
         }
       ],
@@ -579,7 +579,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "description": "Erlang scheduler utilization (0–1 per scheduler). High utilization (> 0.9 sustained) may indicate the node is CPU-bound.",
+      "description": "Reductions executed per second — a proxy for CPU work done by the BEAM (opentelemetry_beam exposes reductions, not scheduler-utilization, in this build). Sustained high rates indicate the node is CPU-busy.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -587,9 +587,7 @@
             "lineInterpolation": "linear",
             "fillOpacity": 5
           },
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1
+          "unit": "short"
         },
         "overrides": []
       },
@@ -602,12 +600,12 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "beam_scheduler_utilization{job=~\"$job\",instance=~\"$instance\"}",
-          "legendFormat": "scheduler {{id}}",
+          "expr": "rate(beam_process_reductions_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "reductions/s",
           "refId": "A"
         }
       ],
-      "title": "Scheduler Utilization",
+      "title": "Process Reductions Rate",
       "type": "timeseries"
     },
     {
@@ -633,15 +631,21 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum(beam_run_queue_length{job=~\"$job\",instance=~\"$instance\"})",
-          "legendFormat": "total run queue",
+          "expr": "beam_cpu_scheduler_run_queues_length{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "normal run-queues",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "beam_run_queue_length{job=~\"$job\",instance=~\"$instance\"}",
-          "legendFormat": "scheduler {{id}}",
+          "expr": "beam_cpu_dirty_cpu_scheduler_run_queue_length{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "dirty CPU run-queue",
           "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "beam_cpu_dirty_io_scheduler_run_queue_length{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "dirty IO run-queue",
+          "refId": "C"
         }
       ],
       "title": "Run-Queue Length",
@@ -710,13 +714,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "rate(beam_gc_count_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "expr": "rate(beam_memory_garbage_collection_count_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
           "legendFormat": "GC collections/s",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "rate(beam_gc_words_reclaimed_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "expr": "rate(beam_memory_garbage_collection_words_reclaimed_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
           "legendFormat": "words reclaimed/s",
           "refId": "B"
         }
@@ -745,7 +749,7 @@
       {
         "current": {},
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "definition": "label_values(gy_charging_outcome_ratio_total, job)",
+        "definition": "label_values(beam_process_count, job)",
         "hide": 0,
         "includeAll": false,
         "label": "Job",
@@ -753,7 +757,7 @@
         "name": "job",
         "options": [],
         "query": {
-          "query": "label_values(gy_charging_outcome_ratio_total, job)",
+          "query": "label_values(beam_process_count, job)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -763,7 +767,7 @@
       {
         "current": {},
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "definition": "label_values(gy_charging_outcome_ratio_total{job=~\"$job\"}, instance)",
+        "definition": "label_values(beam_process_count{job=~\"$job\"}, instance)",
         "hide": 0,
         "includeAll": true,
         "label": "Instance",
@@ -771,7 +775,7 @@
         "name": "instance",
         "options": [],
         "query": {
-          "query": "label_values(gy_charging_outcome_ratio_total{job=~\"$job\"}, instance)",
+          "query": "label_values(beam_process_count{job=~\"$job\"}, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
