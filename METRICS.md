@@ -21,10 +21,14 @@ The CHF emits metrics via two paths:
   the OTEL Prometheus pull reader (`otel_metric_reader_prometheus`).
 
 > [!NOTE]
-> The Prometheus serializer converts `.` to `_` in metric names. The metric
-> `gy.charging.outcome` scrapes as `gy_charging_outcome`; `chf.balance.operation`
-> scrapes as `chf_balance_operation`; `http.server.request.duration` scrapes as
-> `http_server_request_duration`, and so on.
+> The Prometheus serializer converts `.` to `_` in metric names and appends a
+> unit-derived suffix. Because the two hand-rolled counters carry the OTEL
+> dimensionless unit `1`, the exporter renders them with a `_ratio` suffix:
+> `gy.charging.outcome` scrapes as **`gy_charging_outcome_ratio`** and
+> `chf.balance.operation` as **`chf_balance_operation_ratio`** (both still
+> `# TYPE ... counter`). `http.server.request.duration` scrapes as
+> `http_server_request_duration_seconds`, and so on. Scrape `GET /metrics` to
+> see the exact rendered names for your build.
 
 Metrics that are not initialized in the CHF — including any instruments defined
 in the instrumentation libraries but not enabled — are not documented here and
@@ -88,7 +92,7 @@ subsystem never fails a charging request.
 | Field | Value |
 | --- | --- |
 | Name | `gy.charging.outcome` |
-| Prometheus name | `gy_charging_outcome` |
+| Prometheus name | `gy_charging_outcome_ratio` (counter; `_ratio` suffix from OTEL unit `1`) |
 | Type | Counter |
 | Unit | `1` (dimensionless count) |
 | Since | chf 0.1.0 (W5) |
@@ -122,7 +126,7 @@ atoms are produced.
 | Field | Value |
 | --- | --- |
 | Name | `chf.balance.operation` |
-| Prometheus name | `chf_balance_operation` |
+| Prometheus name | `chf_balance_operation_ratio` (counter; `_ratio` suffix from OTEL unit `1`) |
 | Type | Counter |
 | Unit | `1` (dimensionless count) |
 | Since | chf 0.1.0 (W5) |
