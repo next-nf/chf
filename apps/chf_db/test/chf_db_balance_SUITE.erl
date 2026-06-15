@@ -25,6 +25,9 @@
 all() ->
     [reserve_insufficient_returns_error,
      reserve_missing_account_returns_error,
+     reserve_negative_rejected,
+     topup_negative_rejected,
+     topup_zero_creates_empty_row,
      commit_never_exceeds_reserved,
      refund_never_exceeds_reserved,
      invariant_holds_after_ops,
@@ -67,6 +70,33 @@ reserve_insufficient_returns_error(_) ->
 reserve_missing_account_returns_error(_) ->
     ?assertEqual({error, not_found},
                  chf_db:balance_reserve(<<"missing">>, 1)).
+
+%% A negative reservation must be rejected: it would otherwise pass the
+%% `available < amount` check and *decrease* reserved (a stealth refund).
+reserve_negative_rejected(_) ->
+    ok = seed_balance(<<"acc">>, 100, 20),
+    ?assertEqual({error, invalid_amount},
+                 chf_db:balance_reserve(<<"acc">>, -5)),
+    %% Balance untouched.
+    {ok, B} = chf_db:balance_get(<<"acc">>),
+    ?assertEqual(20,  B#balance.reserved),
+    ?assertEqual(80,  B#balance.available).
+
+%% A negative top-up must be rejected: it would otherwise destroy balance.
+topup_negative_rejected(_) ->
+    ok = seed_balance(<<"acc">>, 100, 0),
+    ?assertEqual({error, invalid_amount},
+                 chf_db:balance_topup(<<"acc">>, -50)),
+    {ok, B} = chf_db:balance_get(<<"acc">>),
+    ?assertEqual(100, B#balance.total).
+
+%% A zero top-up must be allowed: subscriber creation uses it to materialise an
+%% empty balance row.
+topup_zero_creates_empty_row(_) ->
+    {ok, B} = chf_db:balance_topup(<<"newacct">>, 0),
+    ?assertEqual(0, B#balance.total),
+    ?assertEqual(0, B#balance.reserved),
+    ?assertEqual(0, B#balance.available).
 
 commit_never_exceeds_reserved(_) ->
     ok = seed_balance(<<"acc">>, 100, 50),

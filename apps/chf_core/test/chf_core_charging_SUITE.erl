@@ -29,6 +29,8 @@ all() ->
      duplicate_create_does_not_clobber,
      terminate_idempotent_no_double_refund,
      concurrent_updates_no_lost_usage,
+     online_initial_rejected_for_terminated_subscriber,
+     converged_lifecycle_charges_and_writes_cdrs,
      sweeper_survives_stray_message].
 
 init_per_testcase(_TC, Config) -> setup_mnesia(), Config.
@@ -139,6 +141,33 @@ concurrent_updates_no_lost_usage(_) ->
     ?assertEqual(100000000 - (N * 100), B#balance.total),
     ?assertEqual(1000 + (N * 900), B#balance.reserved),
     assert_invariant(<<"a">>).
+
+%% A terminated subscriber must be rejected with the distinct
+%% subscriber_terminated reason (not subscriber_suspended).
+online_initial_rejected_for_terminated_subscriber(_) ->
+    Sub = #subscriber{imsi = <<"001">>, msisdn = <<"49001">>, account_id = <<"a">>,
+                      status = terminated, rating_groups = #{},
+                      created_at = 0, updated_at = 0},
+    ok = chf_db:subscriber_create(Sub),
+    {ok, _} = chf_db:balance_topup(<<"a">>, 1000000),
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => online}),
+    ?assertEqual({error, subscriber_terminated},
+                 chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 1000, 0)]})).
+
+%% A converged session charges the balance like an online session AND writes
+%% offline CDRs across its lifecycle (session_start, interim, session_stop).
+converged_lifecycle_charges_and_writes_cdrs(_) ->
+    ok = seed_subscriber(<<"001">>, <<"a">>, 1000000),
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => converged}),
+    {ok, _} = chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 2000, 0)]}),
+    {ok, _} = chf_core:session_update(<<"s">>, #{rating_groups => [rg(1, 2000, 1500)]}),
+    ok = chf_core:session_terminate(<<"s">>, #{rating_groups => [rg(1, 0, 500)]}),
+    B = balance(<<"a">>),
+    ?assertEqual(1000000 - 2000, B#balance.total),
+    ?assertEqual(0, B#balance.reserved),
+    assert_invariant(<<"a">>),
+    {ok, Cdrs} = chf_db:cdr_list(#{session_id => <<"s">>}),
+    ?assert(length(Cdrs) >= 3).
 
 sweeper_survives_stray_message(_) ->
     application:set_env(chf_core, sweep_interval, 100),

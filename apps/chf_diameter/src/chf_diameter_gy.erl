@@ -121,13 +121,16 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, Rati
                      imsi       => Imsi,
                      type       => online},
             case chf_core:create_session(Info) of
-                {ok, _Pid} ->
+                {ok, _SessionId} ->
                     ReqData = #{imsi          => Imsi,
                                 rating_groups => RatingGroups},
                     case chf_core:session_initial(SessionId, ReqData) of
                         {ok, GrantedMap} ->
                             {ok, GrantedMap};
                         {error, Reason} ->
+                            %% Clean up the session persisted by create_session so
+                            %% a failed initial does not orphan an active session.
+                            _ = chf_core:session_terminate(SessionId, #{rating_groups => []}),
                             ?LOG_WARNING("Gy INITIAL failed session=~s reason=~p",
                                          [SessionId, Reason]),
                             {error, error_code(Reason)}
@@ -204,6 +207,7 @@ outcome_atom({error, _})                       -> unable_to_comply.
 
 error_code(insufficient_balance) -> ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED';
 error_code(subscriber_suspended) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
+error_code(subscriber_terminated) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
 error_code(subscriber_not_found) -> ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN';
 error_code(not_found)            -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';
 error_code(session_terminated)   -> ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID';

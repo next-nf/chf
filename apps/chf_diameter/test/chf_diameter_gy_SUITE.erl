@@ -203,6 +203,8 @@ ccr_terminate_success(_Config) ->
 ccr_unknown_error(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"test-session">>} end),
     meck:expect(chf_core, session_initial, fun(_, _) -> {error, something_unexpected} end),
+    %% The handler cleans up the orphaned session on an initial failure.
+    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
 
     SessionId = <<"test-session-err">>,
     SubId = make_sub_id_imsi(<<"001010123456789">>),
@@ -218,6 +220,8 @@ ccr_unknown_error(_Config) ->
 ccr_initial_insufficient_balance(_Config) ->
     meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
     meck:expect(chf_core, session_initial, fun(_, _) -> {error, insufficient_balance} end),
+    %% The handler cleans up the orphaned session on an initial failure.
+    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
     SubId = make_sub_id_imsi(<<"001010123456789">>),
     CCR = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 100, 0)]),
     ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_CREDIT_LIMIT_REACHED}},
