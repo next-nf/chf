@@ -24,7 +24,13 @@
 
 all() ->
     [put_sets_absolute_total,
-     put_below_reserved_409].
+     put_below_reserved_409,
+     get_balance_200,
+     patch_positive_topup,
+     patch_negative_debit,
+     patch_float_value_400,
+     patch_nonexistent_subscriber_404,
+     patch_insufficient_balance_409].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(cowboy),
@@ -71,8 +77,27 @@ setup_mnesia() ->
     ok.
 
 put_req(ConnPid, Path, Body) ->
+    method_req(ConnPid, put, Path, Body).
+
+patch_req(ConnPid, Path, Body) ->
+    method_req(ConnPid, patch, Path, Body).
+
+get_req(ConnPid, Path) ->
+    StreamRef = gun:get(ConnPid, Path, []),
+    {response, IsFin, Status, _H} = gun:await(ConnPid, StreamRef),
+    RespBody = case IsFin of
+        nofin -> {ok, B} = gun:await_body(ConnPid, StreamRef), B;
+        fin   -> <<>>
+    end,
+    {Status, RespBody}.
+
+method_req(ConnPid, Method, Path, Body) ->
     Headers = [{<<"content-type">>, <<"application/json">>}],
-    StreamRef = gun:put(ConnPid, Path, Headers, iolist_to_binary(json:encode(Body))),
+    Bin = iolist_to_binary(json:encode(Body)),
+    StreamRef = case Method of
+        put   -> gun:put(ConnPid, Path, Headers, Bin);
+        patch -> gun:patch(ConnPid, Path, Headers, Bin)
+    end,
     {response, IsFin, Status, _H} = gun:await(ConnPid, StreamRef),
     RespBody = case IsFin of
         nofin -> {ok, B} = gun:await_body(ConnPid, StreamRef), B;
@@ -93,4 +118,53 @@ put_below_reserved_409(Config) ->
     {ok, _} = chf_db:balance_reserve(<<"a">>, 2000),
     {Status, _Body} = put_req(ConnPid, "/api/v1/subscribers/001/balance",
                               #{<<"total">> => 1000}),
+    ?assertEqual(409, Status).
+
+get_balance_200(Config) ->
+    ConnPid = ?config(conn, Config),
+    {Status, Body} = get_req(ConnPid, "/api/v1/subscribers/001/balance"),
+    ?assertEqual(200, Status),
+    Decoded = chf_api_json:decode(Body),
+    ?assertEqual(3000, maps:get(<<"total">>, Decoded)),
+    ?assertEqual(0, maps:get(<<"reserved">>, Decoded)),
+    ?assertEqual(3000, maps:get(<<"available">>, Decoded)).
+
+patch_positive_topup(Config) ->
+    ConnPid = ?config(conn, Config),
+    {Status, Body} = patch_req(ConnPid, "/api/v1/subscribers/001/balance",
+                               #{<<"credit">> => 2000}),
+    ?assertEqual(200, Status),
+    Decoded = chf_api_json:decode(Body),
+    %% After topup of 2000, total should be 3000+2000=5000
+    ?assertEqual(5000, maps:get(<<"total">>, Decoded)).
+
+patch_negative_debit(Config) ->
+    ConnPid = ?config(conn, Config),
+    {Status, Body} = patch_req(ConnPid, "/api/v1/subscribers/001/balance",
+                               #{<<"credit">> => -1000}),
+    ?assertEqual(200, Status),
+    Decoded = chf_api_json:decode(Body),
+    %% After debit of 1000 from 3000, total=2000
+    ?assertEqual(2000, maps:get(<<"total">>, Decoded)),
+    %% reserve+commit leaves reserved=0
+    ?assertEqual(0, maps:get(<<"reserved">>, Decoded)).
+
+patch_float_value_400(Config) ->
+    ConnPid = ?config(conn, Config),
+    %% json:encode/1 will encode 1.5 as a float; handler expects integer
+    {Status, _Body} = patch_req(ConnPid, "/api/v1/subscribers/001/balance",
+                                #{<<"credit">> => 1.5}),
+    ?assertEqual(400, Status).
+
+patch_nonexistent_subscriber_404(Config) ->
+    ConnPid = ?config(conn, Config),
+    {Status, _Body} = patch_req(ConnPid, "/api/v1/subscribers/no-such/balance",
+                                #{<<"credit">> => 100}),
+    ?assertEqual(404, Status).
+
+patch_insufficient_balance_409(Config) ->
+    ConnPid = ?config(conn, Config),
+    %% Try to debit more than available
+    {Status, _Body} = patch_req(ConnPid, "/api/v1/subscribers/001/balance",
+                                #{<<"credit">> => -99999}),
     ?assertEqual(409, Status).

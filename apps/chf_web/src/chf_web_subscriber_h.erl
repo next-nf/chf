@@ -71,6 +71,11 @@ handle_post(Req0, State) ->
                 {ok, Sub} ->
                     case chf_db:subscriber_create(Sub) of
                         ok ->
+                            %% Materialise an empty balance row, matching
+                            %% chf_api_subscriber_h, so the subscriber is
+                            %% immediately chargeable (a missing balance row
+                            %% would otherwise surface as insufficient_balance).
+                            _ = chf_db:balance_topup(Sub#subscriber.account_id, 0),
                             reply(201, #{<<"status">> => <<"created">>,
                                          <<"imsi">>   => Sub#subscriber.imsi},
                                   Req1, State);

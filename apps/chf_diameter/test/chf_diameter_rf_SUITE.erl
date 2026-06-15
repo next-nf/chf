@@ -35,9 +35,11 @@
 -define(ART_INTERIM, 3).
 -define(ART_STOP,    4).
 
--define(DIAMETER_SUCCESS,          2001).
--define(DIAMETER_UNABLE_TO_COMPLY, 5012).
--define(DIAMETER_USER_UNKNOWN,     5030).
+-define(DIAMETER_SUCCESS,              2001).
+-define(DIAMETER_UNABLE_TO_COMPLY,     5012).
+-define(DIAMETER_USER_UNKNOWN,         5030).
+-define(DIAMETER_UNKNOWN_SESSION_ID,   5002).
+-define(DIAMETER_END_USER_SERVICE_DENIED, 4010).
 
 %%====================================================================
 %% CT callbacks
@@ -48,7 +50,12 @@ all() ->
      acr_start_no_imsi,
      acr_interim_success,
      acr_stop_success,
-     acr_event_success].
+     acr_event_success,
+     acr_interim_not_found,
+     acr_stop_not_found,
+     acr_start_subscriber_suspended,
+     acr_start_subscriber_terminated,
+     acr_start_user_unknown].
 
 init_per_suite(Config) ->
     Config.
@@ -160,4 +167,70 @@ acr_event_success(_Config) ->
 
     ?assertMatch({reply, #diameter_rf_ACA{
         'Result-Code' = ?DIAMETER_SUCCESS
+    }}, Result).
+
+%% INTERIM against an unknown session_id → UNKNOWN_SESSION_ID (5002).
+acr_interim_not_found(_Config) ->
+    meck:expect(chf_core, session_update, fun(_, _) -> {error, not_found} end),
+
+    SessionId = <<"rf-session-interim-nf">>,
+    ACR = make_acr(SessionId, ?ART_INTERIM, [<<"001010123456789">>]),
+
+    Result = call_handler(ACR),
+
+    ?assertMatch({reply, #diameter_rf_ACA{
+        'Result-Code' = ?DIAMETER_UNKNOWN_SESSION_ID
+    }}, Result).
+
+%% STOP against an unknown session_id → UNKNOWN_SESSION_ID (5002).
+acr_stop_not_found(_Config) ->
+    meck:expect(chf_core, session_terminate, fun(_, _) -> {error, not_found} end),
+
+    SessionId = <<"rf-session-stop-nf">>,
+    ACR = make_acr(SessionId, ?ART_STOP, [<<"001010123456789">>]),
+
+    Result = call_handler(ACR),
+
+    ?assertMatch({reply, #diameter_rf_ACA{
+        'Result-Code' = ?DIAMETER_UNKNOWN_SESSION_ID
+    }}, Result).
+
+%% START for a suspended subscriber → END_USER_SERVICE_DENIED (4010).
+%% The create_session is mocked to fail, so no session_terminate cleanup is needed.
+acr_start_subscriber_suspended(_Config) ->
+    meck:expect(chf_core, create_session, fun(_) -> {error, subscriber_suspended} end),
+
+    SessionId = <<"rf-session-start-susp">>,
+    ACR = make_acr(SessionId, ?ART_START, [<<"001010123456789">>]),
+
+    Result = call_handler(ACR),
+
+    ?assertMatch({reply, #diameter_rf_ACA{
+        'Result-Code' = ?DIAMETER_END_USER_SERVICE_DENIED
+    }}, Result).
+
+%% START for a terminated subscriber → END_USER_SERVICE_DENIED (4010).
+acr_start_subscriber_terminated(_Config) ->
+    meck:expect(chf_core, create_session, fun(_) -> {error, subscriber_terminated} end),
+
+    SessionId = <<"rf-session-start-term">>,
+    ACR = make_acr(SessionId, ?ART_START, [<<"001010123456789">>]),
+
+    Result = call_handler(ACR),
+
+    ?assertMatch({reply, #diameter_rf_ACA{
+        'Result-Code' = ?DIAMETER_END_USER_SERVICE_DENIED
+    }}, Result).
+
+%% START with no IMSI (empty User-Name) → USER_UNKNOWN (5030).
+%% This mirrors acr_start_no_imsi but makes the error path explicit: the handler
+%% returns early from ensure_imsi/2 without calling chf_core at all.
+acr_start_user_unknown(_Config) ->
+    SessionId = <<"rf-session-start-no-imsi-2">>,
+    ACR = make_acr(SessionId, ?ART_START, []),
+
+    Result = call_handler(ACR),
+
+    ?assertMatch({reply, #diameter_rf_ACA{
+        'Result-Code' = ?DIAMETER_USER_UNKNOWN
     }}, Result).

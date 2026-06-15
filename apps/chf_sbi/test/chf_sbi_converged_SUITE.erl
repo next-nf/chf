@@ -33,6 +33,10 @@ all() ->
      update_session_not_found,
      release_session_success,
      release_session_not_found,
+     release_empty_body,
+     update_session_terminated,
+     release_session_terminated,
+     wrong_content_type,
      create_insufficient_balance_403,
      update_large_body_413].
 
@@ -159,6 +163,62 @@ release_session_not_found(Config) ->
         "/nchf-convergedcharging/v3/chargingdata/nosuchref/release", Body),
 
     ?assertEqual(404, Status).
+
+%% TS 32.291 §6.1 allows an empty body on release (the SMF may have nothing
+%% to report). The handler currently reads the body and rejects <<>> as 400 —
+%% this is stricter than the spec. NOTE: gap — TS 32.291 §6.1.4 permits an
+%% empty ChargingDataRequest body on release; the handler should treat an empty
+%% body as an empty multipleUnitUsage list and return 204, not 400.
+release_empty_body(Config) ->
+    ConnPid = ?config(conn, Config),
+    Headers = [{<<"content-type">>, <<"application/json">>}],
+    StreamRef = gun:post(ConnPid,
+        "/nchf-convergedcharging/v3/chargingdata/ref123/release",
+        Headers, <<>>),
+    {response, _Fin, Status, _RespHeaders} = gun:await(ConnPid, StreamRef),
+    %% Current behavior: 400. NOTE: TS 32.291 §6.1.4 allows an empty release
+    %% body; this should ideally be 204 per the spec.
+    ?assertEqual(400, Status).
+
+%% session_terminated on update maps to 404 via chf_sbi_error:reason_to_problem/1.
+update_session_terminated(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, session_update, fun(_, _) -> {error, session_terminated} end),
+
+    Body = #{<<"multipleUnitUsage">> => []},
+    {Status, _RespHeaders, _RespBody} = post_json(ConnPid,
+        "/nchf-convergedcharging/v3/chargingdata/ref123/update", Body),
+
+    ?assertEqual(404, Status).
+
+%% session_terminated on release maps to 404 via chf_sbi_error:reason_to_problem/1.
+release_session_terminated(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, session_terminate, fun(_, _) -> {error, session_terminated} end),
+
+    Body = #{<<"multipleUnitUsage">> => []},
+    {Status, _RespHeaders, _RespBody} = post_json(ConnPid,
+        "/nchf-convergedcharging/v3/chargingdata/ref123/release", Body),
+
+    ?assertEqual(404, Status).
+
+%% The handler does not enforce Content-Type: it decodes whatever arrives and
+%% relies on the JSON parser to reject non-JSON payloads. A wrong Content-Type
+%% with valid JSON still returns 200 (on update). NOTE: gap — TS 32.291 requires
+%% Content-Type: application/json; the handler should return 415 on mismatch.
+wrong_content_type(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, session_update, fun(_, _) -> {ok, #{1 => 5000000}} end),
+    Body = json:encode(#{<<"multipleUnitUsage">> => []}),
+    Headers = [{<<"content-type">>, <<"text/plain">>}],
+    StreamRef = gun:post(ConnPid,
+        "/nchf-convergedcharging/v3/chargingdata/ref123/update",
+        Headers, Body),
+    {response, nofin, Status, _RespHeaders} = gun:await(ConnPid, StreamRef),
+    %% Current behavior: 200 — handler does not check Content-Type.
+    %% NOTE: TS 32.291 requires Content-Type: application/json; 415 would be
+    %% the correct response.
+    ?assertEqual(200, Status).
 
 create_insufficient_balance_403(Config) ->
     ConnPid = ?config(conn, Config),
