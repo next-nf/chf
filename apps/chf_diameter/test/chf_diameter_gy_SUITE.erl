@@ -57,7 +57,9 @@ all() ->
      ccr_unknown_error,
      ccr_initial_insufficient_balance,
      ccr_update_unknown_session,
-     ccr_update_session_terminated].
+     ccr_update_session_terminated,
+     ccr_event_request,
+     ccr_initial_multi_mscc].
 
 init_per_suite(Config) ->
     Config.
@@ -238,3 +240,35 @@ ccr_update_session_terminated(_Config) ->
     CCR = make_ccr(<<"s">>, ?CCR_UPDATE, [], [make_mscc(1, 100, 0)]),
     ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_UNKNOWN_SESSION_ID}},
                  call_handler(CCR)).
+
+%% CC-Request-Type=EVENT_REQUEST (4) falls to the catch-all clause in handle_ccr/4
+%% and returns UNABLE_TO_COMPLY (5012). NOTE: EVENT is not yet a real session path
+%% in the Gy handler (unlike Rf which has a full event flow); the Ro/Gy interface
+%% uses INITIAL/UPDATE/TERMINATE for online charging — EVENT is rare in 3GPP Gy
+%% deployments. A future implementation would require a full credit-control event
+%% flow. The handler returns UNABLE_TO_COMPLY as a safe fall-through.
+ccr_event_request(_Config) ->
+    %% No chf_core mock needed: the catch-all clause never calls chf_core.
+    CCR = make_ccr(<<"event-session">>, 4, [], []),
+    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_UNABLE_TO_COMPLY}},
+                 call_handler(CCR)).
+
+%% A CCR-INITIAL carrying two rating groups must produce a CCA with two MSCC
+%% entries, one grant per group.
+ccr_initial_multi_mscc(_Config) ->
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"multi-session">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) ->
+        {ok, #{1 => 5000000, 2 => 3000000}}
+    end),
+
+    SessionId = <<"multi-mscc-session">>,
+    SubId     = make_sub_id_imsi(<<"001010123456789">>),
+    MSCC1     = make_mscc(1, 10000000, 0),
+    MSCC2     = make_mscc(2, 6000000, 0),
+    CCR       = make_ccr(SessionId, ?CCR_INITIAL, [SubId], [MSCC1, MSCC2]),
+
+    Result = call_handler(CCR),
+
+    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_SUCCESS}}, Result),
+    {reply, CCA} = Result,
+    ?assertEqual(2, length(CCA#diameter_ro_CCA.'Multiple-Services-Credit-Control')).
