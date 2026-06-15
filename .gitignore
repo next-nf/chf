@@ -22,3 +22,7 @@ apps/*/include/diameter_*.hrl
 # Empty per-app rebar.lock files rebar3 emits for apps that carry their own
 # rebar.config (e.g. chf_diameter's build hooks); only the root lock matters.
 apps/*/rebar.lock
+
+# Local working docs (superpowers brainstorms, specs, plans, roadmaps) — kept
+# on disk for reference but not tracked in the repo.
+docs/superpowers/
