@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+# Least privilege.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Pinned to commit SHAs (supply-chain hardening); version in trailing comment.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24.0
+        with:
+          otp-version: '29'
+          rebar3-version: '3.26.0'
+
+      # Cache the rebar3 cache + _build. The cache key includes rebar.config
+      # because the OpenTelemetry deps are pinned by git branch (next-nf forks),
+      # so there is no rebar.lock hash to key on for those — a rebar.config edit
+      # (e.g. moving a fork pin to a tag) must bust the cache.
+      - name: Cache rebar3 cache and _build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build
+          key: ${{ runner.os }}-otp29-${{ hashFiles('rebar.config', 'rebar.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp29-
+
+      # `rebar3 compile` runs the chf_diameter gen_dict.sh pre_hook, which
+      # regenerates the Diameter codecs from dia/ with OTP's diameter_make
+      # (they are gitignored, not checked in). The next-nf OpenTelemetry forks
+      # are public, so `get-deps` needs no token beyond the default checkout.
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Common Test
+        run: rebar3 ct
+
+      # NOTE: `rebar3 dialyzer` is intentionally NOT gated here yet. chf currently
+      # has dialyzer warnings driven by the experimental OpenTelemetry API's loose
+      # success typings plus some pre-existing handler warnings; clearing those is
+      # a separate cleanup, tracked in the roadmap. Add a dialyzer step here once
+      # the tree is warning-clean.
+
+      # GitHub bills artifacts by uncompressed size; upload one pre-compressed tarball.
+      - name: Package CT logs on failure
+        if: failure()
+        run: |
+          if [ -d _build/test/logs ]; then
+            tar -cJf ct-logs.tar.xz -C _build/test logs
+          fi
+
+      - name: Upload CT logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ct-logs
+          path: ct-logs.tar.xz
+          if-no-files-found: ignore
