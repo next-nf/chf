@@ -64,28 +64,34 @@ create_session(#{session_id := SessionId, imsi := Imsi, type := Type}) ->
 -spec session_initial(SessionId :: binary(), RequestData :: map()) ->
     {ok, outcome_map()} | {error, term()}.
 session_initial(SessionId, RequestData) ->
-    chf_db:session_transaction(SessionId, fun
-        (#charging_session{state = active} = S) -> do_initial(S, RequestData);
-        (#charging_session{state = terminated}) -> {abort, session_terminated};
-        (undefined)                             -> {abort, not_found}
+    with_quorum(fun() ->
+        chf_db:session_transaction(SessionId, fun
+            (#charging_session{state = active} = S) -> do_initial(S, RequestData);
+            (#charging_session{state = terminated}) -> {abort, session_terminated};
+            (undefined)                             -> {abort, not_found}
+        end)
     end).
 
 -spec session_update(SessionId :: binary(), RequestData :: map()) ->
     {ok, outcome_map()} | {error, term()}.
 session_update(SessionId, RequestData) ->
-    chf_db:session_transaction(SessionId, fun
-        (#charging_session{state = active} = S) -> do_update(S, RequestData);
-        (#charging_session{state = terminated}) -> {abort, session_terminated};
-        (undefined)                             -> {abort, not_found}
+    with_quorum(fun() ->
+        chf_db:session_transaction(SessionId, fun
+            (#charging_session{state = active} = S) -> do_update(S, RequestData);
+            (#charging_session{state = terminated}) -> {abort, session_terminated};
+            (undefined)                             -> {abort, not_found}
+        end)
     end).
 
 -spec session_terminate(SessionId :: binary(), RequestData :: map()) ->
     ok | {error, term()}.
 session_terminate(SessionId, RequestData) ->
-    chf_db:session_transaction(SessionId, fun
-        (#charging_session{state = active} = S) -> do_terminate(S, RequestData);
-        (#charging_session{state = terminated}) -> {result, ok};
-        (undefined)                             -> {abort, not_found}
+    with_quorum(fun() ->
+        chf_db:session_transaction(SessionId, fun
+            (#charging_session{state = active} = S) -> do_terminate(S, RequestData);
+            (#charging_session{state = terminated}) -> {result, ok};
+            (undefined)                             -> {abort, not_found}
+        end)
     end).
 
 %% @doc Terminate a session only if it is still stale (used by the sweeper).
@@ -94,17 +100,19 @@ session_terminate(SessionId, RequestData) ->
 -spec session_terminate_if_stale(SessionId :: binary(), MaxAge :: integer()) ->
     ok | skipped | {error, term()}.
 session_terminate_if_stale(SessionId, MaxAge) ->
-    Now = now_ms(),
-    chf_db:session_transaction(SessionId, fun
-        (#charging_session{state = active, updated_at = U} = S)
-          when (Now - U) > MaxAge ->
-            do_terminate(S, #{rating_groups => []});
-        (#charging_session{state = active}) ->
-            {result, skipped};
-        (#charging_session{state = terminated}) ->
-            {result, ok};
-        (undefined) ->
-            {result, {error, not_found}}
+    with_quorum(fun() ->
+        Now = now_ms(),
+        chf_db:session_transaction(SessionId, fun
+            (#charging_session{state = active, updated_at = U} = S)
+              when (Now - U) > MaxAge ->
+                do_terminate(S, #{rating_groups => []});
+            (#charging_session{state = active}) ->
+                {result, skipped};
+            (#charging_session{state = terminated}) ->
+                {result, ok};
+            (undefined) ->
+                {result, {error, not_found}}
+        end)
     end).
 
 %%====================================================================
@@ -266,3 +274,18 @@ merge_add(A, B) ->
 -spec granted_amounts(outcome_map()) -> #{non_neg_integer() => non_neg_integer()}.
 granted_amounts(OutcomeMap) ->
     maps:map(fun(_RGId, #{granted := G}) -> G end, OutcomeMap).
+
+%% Guard: only execute Fun() when this node is in quorum (strict majority of
+%% configured cluster nodes reachable).  On a minority partition, charging
+%% mutations are refused with {error, no_quorum} — fail-closed so a split-brain
+%% node cannot double-spend balances while the majority side continues operating.
+%% create_session/1 is intentionally NOT gated: writing a new session record
+%% carries no balance risk.  The session_initial that follows IS gated and will
+%% return no_quorum, so the record is created but never charged; any such
+%% orphaned session is reclaimed by the sweeper once quorum is restored.
+-spec with_quorum(fun(() -> R)) -> R | {error, no_quorum}.
+with_quorum(Fun) ->
+    case chf_cluster:in_quorum() of
+        true  -> Fun();
+        false -> {error, no_quorum}
+    end.

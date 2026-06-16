@@ -23,8 +23,8 @@
 %% take over via global:register_name. The active node performs the periodic
 %% sweep; standby nodes ignore sweep timer messages.
 %%
-%% Quorum-gating (only sweep when a majority of nodes are up) is deferred to
-%% a later task — do NOT add quorum logic here.
+%% Quorum-gating: the active sweeper skips the scan when chf_cluster:in_quorum/0
+%% is false.  A minority-partition node must not terminate or refund sessions.
 -module(chf_session_sweeper).
 -behaviour(gen_server).
 
@@ -121,15 +121,21 @@ schedule(Interval) ->
     erlang:send_after(Interval, self(), sweep).
 
 sweep(MaxAge) ->
-    case chf_db:session_list_active() of
-        {ok, Sessions} ->
-            lists:foreach(fun(#charging_session{session_id = SId}) ->
-                case chf_core:session_terminate_if_stale(SId, MaxAge) of
-                    ok      -> ?LOG_INFO("Sweeper: terminated stale session ~s", [SId]);
-                    skipped -> ok;
-                    _Other  -> ok
-                end
-            end, Sessions);
-        _Error ->
-            ok
+    case chf_cluster:in_quorum() of
+        false ->
+            ?LOG_DEBUG("Session sweeper: skipping scan (not in quorum)"),
+            ok;
+        true ->
+            case chf_db:session_list_active() of
+                {ok, Sessions} ->
+                    lists:foreach(fun(#charging_session{session_id = SId}) ->
+                        case chf_core:session_terminate_if_stale(SId, MaxAge) of
+                            ok      -> ?LOG_INFO("Sweeper: terminated stale session ~s", [SId]);
+                            skipped -> ok;
+                            _Other  -> ok
+                        end
+                    end, Sessions);
+                _Error ->
+                    ok
+            end
     end.

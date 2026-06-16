@@ -35,7 +35,8 @@ all() ->
      partial_grant_marks_final,
      zero_available_credit_limit_reached,
      multi_rg_drain_leaves_trailing_credit_limited,
-     sweeper_registers_globally].
+     sweeper_registers_globally,
+     charging_fails_closed_out_of_quorum].
 
 init_per_testcase(_TC, Config) -> setup_mnesia(), Config.
 end_per_testcase(_TC, _Config) -> mnesia:stop(), ok.
@@ -218,3 +219,25 @@ sweeper_registers_globally(_) ->
     {ok, Pid} = chf_session_sweeper:start_link(),
     ?assertEqual(Pid, global:whereis_name(chf_session_sweeper)),
     gen_server:stop(Pid).
+
+%% A minority-partition node must not mutate balances.  When chf_cluster:in_quorum/0
+%% returns false, the four charging mutation ops must return {error, no_quorum}
+%% without touching the balance.
+charging_fails_closed_out_of_quorum(_) ->
+    meck:new(chf_cluster, [passthrough]),
+    meck:expect(chf_cluster, in_quorum, fun() -> false end),
+    ok = seed_subscriber(<<"001">>, <<"a">>, 1000000),
+    {ok,_} = chf_core:create_session(#{session_id=><<"s">>, imsi=><<"001">>, type=>online}),
+    %% All four charging mutation ops must fail closed — not just session_initial.
+    ?assertEqual({error, no_quorum},
+                 chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1,1000,0)]})),
+    ?assertEqual({error, no_quorum},
+                 chf_core:session_update(<<"s">>, #{rating_groups => [rg(1,1000,400)]})),
+    ?assertEqual({error, no_quorum},
+                 chf_core:session_terminate(<<"s">>, #{rating_groups => []})),
+    ?assertEqual({error, no_quorum},
+                 chf_core:session_terminate_if_stale(<<"s">>, 0)),
+    %% balance untouched (no reservation happened)
+    B = balance(<<"a">>),
+    ?assertEqual(0, B#balance.reserved),
+    meck:unload(chf_cluster).

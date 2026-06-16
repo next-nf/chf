@@ -41,7 +41,8 @@ all() ->
      update_large_body_413,
      converged_response_final_unit_indication,
      converged_response_full_grant_no_fui,
-     converged_response_final_grant_fui_with_grant].
+     converged_response_final_grant_fui_with_grant,
+     create_session_no_quorum_503].
 
 init_per_suite(Config) ->
     %% Start cowboy and ranch if not already running.
@@ -293,6 +294,20 @@ converged_response_final_grant_fui_with_grant(Config) ->
     ?assertEqual(500, maps:get(<<"totalVolume">>, maps:get(<<"grantedUnit">>, MUI))),
     ?assertEqual(<<"TERMINATE">>,
                  maps:get(<<"finalUnitAction">>, maps:get(<<"finalUnitIndication">>, MUI))).
+
+%% When chf_core:session_initial returns {error, no_quorum}, the SBI handler
+%% must reply 503 Service Unavailable (fail-closed: cluster quorum lost).
+%% The handler also calls session_terminate to clean up the orphaned session —
+%% mock it so the test does not error on an unexpected call.
+create_session_no_quorum_503(Config) ->
+    ConnPid = ?config(conn, Config),
+    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
+    meck:expect(chf_core, session_initial, fun(_, _) -> {error, no_quorum} end),
+    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
+    Body = #{<<"subscriberIdentifier">> => #{<<"sUPI">> => <<"imsi-001010123456789">>}},
+    {Status, _H, _RespBody} = post_json(ConnPid,
+        "/nchf-convergedcharging/v3/chargingdata", Body),
+    ?assertEqual(503, Status).
 
 %%====================================================================
 %% Internal helpers

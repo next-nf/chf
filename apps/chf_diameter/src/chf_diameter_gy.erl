@@ -205,6 +205,7 @@ outcome_atom({error, _})                       -> unable_to_comply.
 %% Error code mapping
 %%====================================================================
 
+error_code(no_quorum)            -> ?'DIAMETER_BASE_RESULT-CODE_TOO_BUSY';
 error_code(insufficient_balance) -> ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED';
 error_code(subscriber_suspended) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
 error_code(subscriber_terminated) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';

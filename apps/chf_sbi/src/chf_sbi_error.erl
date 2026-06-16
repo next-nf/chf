@@ -53,6 +53,8 @@ reply_error(Status, Title, Detail, Req) ->
 %% @doc Map an internal chf_core/chf_online error reason to a
 %% {Status, Title, Detail} triple per TS 32.291. Never leaks internal terms.
 -spec reason_to_problem(term()) -> {non_neg_integer(), binary(), binary()}.
+reason_to_problem(no_quorum) ->
+    {503, <<"Service Unavailable">>, <<"charging temporarily unavailable (cluster quorum lost)">>};
 reason_to_problem(not_found) ->
     {404, <<"NOT_FOUND">>, <<"No charging session with the given reference">>};
 reason_to_problem(session_terminated) ->
