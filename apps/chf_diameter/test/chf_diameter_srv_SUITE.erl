@@ -35,7 +35,8 @@
 
 all() ->
     [common_app_is_rfc6733_at_appid0,
-     ro_and_rf_use_request_errors_answer].
+     ro_and_rf_use_request_errors_answer,
+     origin_host_is_node_unique].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(diameter),
@@ -77,6 +78,14 @@ ro_and_rf_use_request_errors_answer(_Config) ->
         Opts = proplists:get_value(options, App, []),
         ?assertEqual(answer, proplists:get_value(request_errors, Opts))
     end, [ro, rf]).
+
+%% effective_origin_host/0 must embed the node's short name so every cluster
+%% node presents a unique DiameterIdentity to peers.
+origin_host_is_node_unique(_) ->
+    application:set_env(chf_diameter, origin_host, "chf.epc.example.org"),
+    H = chf_diameter_srv:effective_origin_host(),
+    [Short | _] = string:split(atom_to_list(node()), "@"),
+    ?assert(string:str(H, Short) > 0).
 
 %%--- helpers ---------------------------------------------------------
 

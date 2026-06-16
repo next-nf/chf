@@ -29,7 +29,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/0]).
+-export([start_link/0, effective_origin_host/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(SERVICE, 'next-chf').
@@ -42,12 +42,28 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+%% effective_origin_host/0 — returns the Origin-Host this node advertises.
+%%
+%% When cluster_unique_origin_host is true (the default) the node's short name
+%% is prepended to the configured base hostname so that every cluster node
+%% presents a unique DiameterIdentity to peers (RFC 6733 §3.3).  Operators who
+%% manage uniqueness themselves (e.g. via per-node sys.config) may set
+%% cluster_unique_origin_host to false to use the bare configured value.
+-spec effective_origin_host() -> string().
+effective_origin_host() ->
+    Base = application:get_env(chf_diameter, origin_host, "chf.local"),
+    [Short | _] = string:split(atom_to_list(node()), "@"),
+    case application:get_env(chf_diameter, cluster_unique_origin_host, true) of
+        true  -> Short ++ "." ++ Base;   %% e.g. "chf1.chf.epc.example.org"
+        false -> Base
+    end.
+
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
 
 init([]) ->
-    OriginHost  = application:get_env(chf_diameter, origin_host,  "chf.local"),
+    OriginHost  = effective_origin_host(),
     OriginRealm = application:get_env(chf_diameter, origin_realm, "local"),
     Listen      = application:get_env(chf_diameter, listen,
                                       [{tcp, {0,0,0,0}, 3868}]),
