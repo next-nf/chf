@@ -51,7 +51,10 @@ all() ->
      balance_set_total_below_reserved,
      balance_set_total_fresh_acct,
      balance_get_found,
-     balance_get_missing].
+     balance_get_missing,
+     %% Mongo multi-document transaction atomicity
+     mongo_txn_commit_persists,
+     mongo_txn_abort_rolls_back].
 
 %%--------------------------------------------------------------------
 %% Suite init/end
@@ -297,6 +300,40 @@ balance_get_found(_Config) ->
 balance_get_missing(_Config) ->
     ?assertEqual({error, not_found},
                  chf_db_mongo:balance_get(<<"missing">>)).
+
+%%--------------------------------------------------------------------
+%% MongoDB multi-document transaction atomicity tests
+%%--------------------------------------------------------------------
+
+%% mongo_txn_commit_persists — a {commit, NewSession, Result} causes the
+%% balance update (balance_reserve_up_to inside the Fun) AND the session
+%% write to be visible after the transaction commits.
+mongo_txn_commit_persists(_Config) ->
+    {ok, _} = chf_db_mongo:balance_topup(<<"a">>, 1000000),
+    R = chf_db_mongo:session_transaction(<<"s">>, fun(Ctx, undefined) ->
+            {ok, 2000, _} = chf_db_mongo:balance_reserve_up_to(Ctx, <<"a">>, 2000),
+            New = #charging_session{session_id = <<"s">>, imsi = <<"1">>, type = online, state = active,
+                                    granted_units = #{1 => 2000}, used_units = #{}, created_at = 0, updated_at = 0},
+            {commit, New, {ok, granted}}
+        end),
+    ?assertEqual({ok, granted}, R),
+    {ok, B} = chf_db_mongo:balance_get(<<"a">>),
+    ?assertEqual(2000, B#balance.reserved),
+    {ok, _} = chf_db_mongo:session_lookup(<<"s">>).
+
+%% mongo_txn_abort_rolls_back — a {abort, Reason} causes ALL writes inside
+%% the Fun to be rolled back: the balance reservation is reversed and the
+%% session doc is never written.
+mongo_txn_abort_rolls_back(_Config) ->
+    {ok, _} = chf_db_mongo:balance_topup(<<"b">>, 1000000),
+    R = chf_db_mongo:session_transaction(<<"s2">>, fun(Ctx, undefined) ->
+            {ok, 3000, _} = chf_db_mongo:balance_reserve_up_to(Ctx, <<"b">>, 3000),
+            {abort, deliberate}
+        end),
+    ?assertEqual({error, deliberate}, R),
+    {ok, B} = chf_db_mongo:balance_get(<<"b">>),
+    ?assertEqual(0, B#balance.reserved),
+    ?assertEqual({error, not_found}, chf_db_mongo:session_lookup(<<"s2">>)).
 
 %%--------------------------------------------------------------------
 %% Internal helpers

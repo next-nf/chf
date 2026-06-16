@@ -57,7 +57,7 @@
     subscriber_lookup/1,
     subscriber_update/1,
     subscriber_delete/1,
-    %% Balance
+    %% Balance — standalone (no transaction context)
     balance_get/1,
     balance_topup/2,
     balance_reserve/2,
@@ -65,14 +65,21 @@
     balance_commit/2,
     balance_refund/2,
     balance_set_total/2,
+    %% Balance — Ctx-aware (inside a session_transaction)
+    balance_reserve_up_to/3,
+    balance_commit/3,
+    balance_refund/3,
     %% Session
     session_store/1,
     session_lookup/1,
     session_delete/1,
     session_list_active/0,
-    %% CDR
+    session_transaction/2,
+    %% CDR — standalone
     cdr_write/1,
-    cdr_list/1
+    cdr_list/1,
+    %% CDR — Ctx-aware
+    cdr_write/2
 ]).
 
 %%====================================================================
@@ -553,6 +560,192 @@ cdr_list(Filters) ->
     {ok, Cdrs}.
 
 %%====================================================================
+%% Public API — MongoDB multi-document transactions
+%%====================================================================
+
+%% session_transaction/2 — Execute Fun inside a MongoDB multi-document
+%% transaction, holding a single poolboy worker (same TCP connection) for the
+%% entire duration so all commands share the same session.
+%%
+%% Protocol:
+%%   1. Check out ONE poolboy worker via mc_topology:get_pool + poolboy:transaction.
+%%   2. startSession → Lsid; TxnNumber = 2147483648 (int64 territory).
+%%   3. Read the charging_session document for SessionId WITH startTransaction:true
+%%      (this opens the transaction; the read is the first op in the txn).
+%%   4. Build Ctx = #{worker, lsid, txn} and call Fun(Ctx, Session).
+%%   5. On {commit, NewSession, Result}: write NewSession doc with the txn, then
+%%      commitTransaction → return Result.
+%%      On {result, Result}: commit without a session write → return Result.
+%%      On {abort, Reason}: abortTransaction → return {error, Reason}.
+%%   6. Bounded retry (up to 3 attempts) on transient transaction errors
+%%      (<<"TransientTransactionError">> or <<"UnknownTransactionCommitResult">>
+%%      in the errorLabels of a failed command reply).
+%%
+%% Ctx threading model: the Ctx map carries the worker pid, lsid, and
+%% txnNumber. Ctx-aware ops (balance_reserve_up_to/3, balance_commit/3,
+%% balance_refund/3, cdr_write/2) attach the session fields to each command
+%% WITHOUT startTransaction (the first session read already started it).
+-define(TXN_NUMBER, 2147483648).   %% > 2^31-1 → BSON int64
+-define(TXN_RETRIES, 3).
+
+-type session_ctx() :: #{worker   => pid(),
+                         lsid     => map(),
+                         txn      => integer()}.
+
+-spec session_transaction(binary(), fun((session_ctx(), #charging_session{} | undefined) ->
+    {commit, #charging_session{}, term()} |
+    {result, term()} |
+    {abort, term()})) ->
+    term() | {error, term()}.
+session_transaction(SessionId, Fun) ->
+    do_session_transaction(SessionId, Fun, ?TXN_RETRIES).
+
+do_session_transaction(_SessionId, _Fun, 0) ->
+    {error, transaction_retries_exhausted};
+do_session_transaction(SessionId, Fun, RetriesLeft) ->
+    {ok, #{pool := PoolPid}} = mc_topology:get_pool(topology(), []),
+    try poolboy:transaction(PoolPid, fun(W) ->
+        %% Step 1: Start a Mongo server session.
+        {true, SessReply} = mc_worker_api:command(W, {<<"startSession">>, 1}),
+        IdVal = maps:get(<<"id">>, SessReply),
+        Lsid  = #{<<"id">> => extract_lsid(IdVal)},
+        TxnNumber = ?TXN_NUMBER,
+
+        %% Step 2: Open the transaction by reading the session doc with
+        %% startTransaction:true on this first command.
+        Session = txn_find_session(W, Lsid, TxnNumber, SessionId),
+
+        %% Step 3: Build the Ctx for Ctx-aware ops (subsequent ops, no startTransaction).
+        Ctx = #{worker => W, lsid => Lsid, txn => TxnNumber},
+
+        %% Step 4: Call the user-supplied Fun.
+        case Fun(Ctx, Session) of
+            {commit, NewSession, Result} ->
+                %% Write the session doc inside the transaction.
+                Doc = chf_db_mongo_codec:from_session(NewSession),
+                SessionIdKey = NewSession#charging_session.session_id,
+                txn_upsert_session(W, Lsid, TxnNumber, SessionIdKey, Doc),
+                commit_txn(W, Lsid, TxnNumber),
+                Result;
+            {result, R} ->
+                commit_txn(W, Lsid, TxnNumber),
+                R;
+            {abort, Reason} ->
+                abort_txn(W, Lsid, TxnNumber),
+                {error, Reason}
+        end
+    end, 30000)
+    catch
+        error:{bad_query, #{<<"errorLabels">> := Labels} = _Reply}
+            when is_list(Labels) ->
+            case lists:member(<<"TransientTransactionError">>, Labels)
+                orelse lists:member(<<"UnknownTransactionCommitResult">>, Labels) of
+                true  -> do_session_transaction(SessionId, Fun, RetriesLeft - 1);
+                false -> {error, {mongo_error, Labels}}
+            end;
+        error:Reason ->
+            {error, Reason}
+    end.
+
+%%====================================================================
+%% Public API — Ctx-aware balance operations (inside a transaction)
+%%====================================================================
+
+%% balance_reserve_up_to/3 — Best-effort reserve inside a running transaction.
+%% Reads the balance doc with the txn, computes Granted in Erlang, writes back.
+%% Returns {ok, Granted, #balance{}} | {error, not_found | invalid_amount}.
+%% Does NOT abort the transaction — caller decides on error.
+-spec balance_reserve_up_to(session_ctx(), binary(), integer()) ->
+    {ok, non_neg_integer(), #balance{}} | {error, not_found | invalid_amount}.
+balance_reserve_up_to(_Ctx, _AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
+balance_reserve_up_to(#{worker := W, lsid := Lsid, txn := TxnNumber},
+                       AccountId, Amount) ->
+    %% Read current balance doc inside the transaction.
+    case txn_find_one(W, Lsid, TxnNumber, ?BALANCES, #{<<"_id">> => AccountId}) of
+        undefined ->
+            {error, not_found};
+        Doc ->
+            Before = chf_db_mongo_codec:to_balance(Doc),
+            {Granted, NewReserved, NewAvailable} =
+                compute_reserve_up_to(Before, Amount),
+            NewDoc = Doc#{
+                <<"reserved">>  => NewReserved,
+                <<"available">> => NewAvailable
+            },
+            txn_replace(W, Lsid, TxnNumber, ?BALANCES, AccountId, NewDoc),
+            Post = Before#balance{reserved  = NewReserved,
+                                  available = NewAvailable},
+            {ok, Granted, Post}
+    end.
+
+%% balance_commit/3 — Commit up to Amount inside a running transaction.
+%% Reads, computes in Erlang, writes back.
+%% Returns {ok, #balance{}} | {error, not_found}.
+-spec balance_commit(session_ctx(), binary(), integer()) ->
+    {ok, #balance{}} | {error, not_found}.
+balance_commit(#{worker := W, lsid := Lsid, txn := TxnNumber},
+               AccountId, Amount) ->
+    case txn_find_one(W, Lsid, TxnNumber, ?BALANCES, #{<<"_id">> => AccountId}) of
+        undefined ->
+            {error, not_found};
+        Doc ->
+            Before = chf_db_mongo_codec:to_balance(Doc),
+            {NewTotal, NewReserved, NewAvailable} =
+                compute_commit(Before, Amount),
+            NewDoc = Doc#{
+                <<"total">>     => NewTotal,
+                <<"reserved">>  => NewReserved,
+                <<"available">> => NewAvailable
+            },
+            txn_replace(W, Lsid, TxnNumber, ?BALANCES, AccountId, NewDoc),
+            Post = Before#balance{total     = NewTotal,
+                                  reserved  = NewReserved,
+                                  available = NewAvailable},
+            {ok, Post}
+    end.
+
+%% balance_refund/3 — Refund up to Amount inside a running transaction.
+%% Returns {ok, #balance{}} | {error, not_found}.
+-spec balance_refund(session_ctx(), binary(), integer()) ->
+    {ok, #balance{}} | {error, not_found}.
+balance_refund(#{worker := W, lsid := Lsid, txn := TxnNumber},
+               AccountId, Amount) ->
+    case txn_find_one(W, Lsid, TxnNumber, ?BALANCES, #{<<"_id">> => AccountId}) of
+        undefined ->
+            {error, not_found};
+        Doc ->
+            Before = chf_db_mongo_codec:to_balance(Doc),
+            {NewReserved, NewAvailable} = compute_refund(Before, Amount),
+            NewDoc = Doc#{
+                <<"reserved">>  => NewReserved,
+                <<"available">> => NewAvailable
+            },
+            txn_replace(W, Lsid, TxnNumber, ?BALANCES, AccountId, NewDoc),
+            Post = Before#balance{reserved  = NewReserved,
+                                  available = NewAvailable},
+            {ok, Post}
+    end.
+
+%%====================================================================
+%% Public API — Ctx-aware CDR operations (inside a transaction)
+%%====================================================================
+
+%% cdr_write/2 — Insert a CDR document inside a running transaction.
+-spec cdr_write(session_ctx(), #cdr{}) -> ok | {error, term()}.
+cdr_write(#{worker := W, lsid := Lsid, txn := TxnNumber}, Cdr) ->
+    Doc = chf_db_mongo_codec:from_cdr(Cdr),
+    Cmd = {<<"insert">>,    ?CDRS,
+           <<"documents">>, [Doc],
+           <<"lsid">>,      Lsid,
+           <<"txnNumber">>, TxnNumber,
+           <<"autocommit">>, false},
+    case mc_worker_api:command(W, Cmd) of
+        {true, _}  -> ok;
+        {false, R} -> {error, R}
+    end.
+
+%%====================================================================
 %% Internal: worker checkout helper
 %%====================================================================
 
@@ -564,6 +757,155 @@ with_worker(Fun) ->
     mongoc:transaction(topology(), fun(#{pool := W}) ->
         Fun(W)
     end, #{}).
+
+%%====================================================================
+%% Internal: transaction helper functions
+%%====================================================================
+
+%% extract_lsid/1 — Pull the UUID binary out of startSession's nested reply.
+%% startSession returns #{<<"id">> => #{<<"id">> => {bin, uuid, <<16-bytes>>}}}.
+-spec extract_lsid(term()) -> {bin, uuid, binary()}.
+extract_lsid(#{<<"id">> := {bin, uuid, Bin}}) when is_binary(Bin) ->
+    {bin, uuid, Bin};
+extract_lsid(#{<<"id">> := Bin}) when is_binary(Bin) ->
+    {bin, uuid, Bin};
+extract_lsid({bin, uuid, Bin}) when is_binary(Bin) ->
+    {bin, uuid, Bin}.
+
+%% txn_find_session/4 — Read a charging_session doc as the FIRST op in a
+%% transaction (includes startTransaction:true + autocommit:false).
+%% Returns #charging_session{} | undefined.
+-spec txn_find_session(pid(), map(), integer(), binary()) ->
+    #charging_session{} | undefined.
+txn_find_session(W, Lsid, TxnNumber, SessionId) ->
+    Cmd = {<<"find">>,            ?CHARGING_SESSIONS,
+           <<"filter">>,          #{<<"_id">> => SessionId},
+           <<"limit">>,           1,
+           <<"singleBatch">>,     true,
+           <<"lsid">>,            Lsid,
+           <<"txnNumber">>,       TxnNumber,
+           <<"startTransaction">>, true,
+           <<"autocommit">>,      false},
+    case mc_worker_api:command(W, Cmd) of
+        {true, #{<<"cursor">> := #{<<"firstBatch">> := [Doc | _]}}} ->
+            chf_db_mongo_codec:to_session(Doc);
+        {true, #{<<"cursor">> := #{<<"firstBatch">> := []}}} ->
+            undefined;
+        {true, _} ->
+            undefined
+    end.
+
+%% txn_find_one/5 — Read a single document inside a running transaction
+%% (subsequent op: no startTransaction, has autocommit:false).
+-spec txn_find_one(pid(), map(), integer(), binary(), map()) ->
+    map() | undefined.
+txn_find_one(W, Lsid, TxnNumber, Collection, Filter) ->
+    Cmd = {<<"find">>,        Collection,
+           <<"filter">>,      Filter,
+           <<"limit">>,       1,
+           <<"singleBatch">>, true,
+           <<"lsid">>,        Lsid,
+           <<"txnNumber">>,   TxnNumber,
+           <<"autocommit">>,  false},
+    case mc_worker_api:command(W, Cmd) of
+        {true, #{<<"cursor">> := #{<<"firstBatch">> := [Doc | _]}}} ->
+            Doc;
+        {true, #{<<"cursor">> := #{<<"firstBatch">> := []}}} ->
+            undefined;
+        {true, _} ->
+            undefined
+    end.
+
+%% txn_replace/6 — Replace a document by _id inside a running transaction.
+%% Uses findAndModify with upsert:false (doc already exists from prior read;
+%% caller must handle the not_found case before calling this).
+-spec txn_replace(pid(), map(), integer(), binary(), binary(), map()) -> ok.
+txn_replace(W, Lsid, TxnNumber, Collection, Id, NewDoc) ->
+    Cmd = {<<"findAndModify">>, Collection,
+           <<"query">>,  #{<<"_id">> => Id},
+           <<"update">>, NewDoc,
+           <<"new">>,    false,
+           <<"lsid">>,   Lsid,
+           <<"txnNumber">>, TxnNumber,
+           <<"autocommit">>, false},
+    {true, _} = mc_worker_api:command(W, Cmd),
+    ok.
+
+%% txn_upsert_session/5 — Upsert a charging_session doc inside the transaction.
+%% Uses findAndModify with upsert:true to handle both insert and replace.
+-spec txn_upsert_session(pid(), map(), integer(), binary(), map()) -> ok.
+txn_upsert_session(W, Lsid, TxnNumber, SessionId, Doc) ->
+    Cmd = {<<"findAndModify">>, ?CHARGING_SESSIONS,
+           <<"query">>,  #{<<"_id">> => SessionId},
+           <<"update">>, Doc,
+           <<"upsert">>, true,
+           <<"new">>,    false,
+           <<"lsid">>,   Lsid,
+           <<"txnNumber">>, TxnNumber,
+           <<"autocommit">>, false},
+    {true, _} = mc_worker_api:command(W, Cmd),
+    ok.
+
+%% commit_txn/3 — Issue commitTransaction targeting the admin database.
+-spec commit_txn(pid(), map(), integer()) -> ok.
+commit_txn(W, Lsid, TxnNumber) ->
+    Cmd = {<<"commitTransaction">>, 1,
+           <<"lsid">>,              Lsid,
+           <<"txnNumber">>,         TxnNumber,
+           <<"autocommit">>,        false},
+    {true, _} = mc_worker_api:command(<<"admin">>, W, Cmd),
+    ok.
+
+%% abort_txn/3 — Issue abortTransaction targeting the admin database.
+-spec abort_txn(pid(), map(), integer()) -> ok.
+abort_txn(W, Lsid, TxnNumber) ->
+    Cmd = {<<"abortTransaction">>, 1,
+           <<"lsid">>,             Lsid,
+           <<"txnNumber">>,        TxnNumber,
+           <<"autocommit">>,       false},
+    %% Abort may return false on a no-op (e.g. if txn already expired).
+    %% Ignore the result — we're rolling back regardless.
+    _ = mc_worker_api:command(<<"admin">>, W, Cmd),
+    ok.
+
+%%====================================================================
+%% Internal: shared balance compute helpers (used by /2 and /3 variants)
+%%====================================================================
+
+%% compute_reserve_up_to/2 — Pure arithmetic: grant = min(Amount, max(0, avail)).
+%% Returns {Granted, NewReserved, NewAvailable}.
+-spec compute_reserve_up_to(#balance{}, non_neg_integer()) ->
+    {non_neg_integer(), integer(), integer()}.
+compute_reserve_up_to(#balance{total    = Total,
+                               reserved = Reserved,
+                               available = Available}, Amount) ->
+    Granted      = min(Amount, max(0, Available)),
+    NewReserved  = Reserved + Granted,
+    NewAvailable = Total - NewReserved,
+    {Granted, NewReserved, NewAvailable}.
+
+%% compute_commit/2 — Pure arithmetic: commit = min(max(0, Amount), reserved).
+%% Returns {NewTotal, NewReserved, NewAvailable}.
+-spec compute_commit(#balance{}, integer()) ->
+    {integer(), integer(), integer()}.
+compute_commit(#balance{total    = Total,
+                        reserved = Reserved}, Amount) ->
+    Commit       = min(max(0, Amount), Reserved),
+    NewReserved  = Reserved - Commit,
+    NewTotal     = Total    - Commit,
+    NewAvailable = NewTotal - NewReserved,
+    {NewTotal, NewReserved, NewAvailable}.
+
+%% compute_refund/2 — Pure arithmetic: refund = min(max(0, Amount), reserved).
+%% Returns {NewReserved, NewAvailable}.
+-spec compute_refund(#balance{}, integer()) ->
+    {integer(), integer()}.
+compute_refund(#balance{total    = Total,
+                        reserved = Reserved}, Amount) ->
+    Refund       = min(max(0, Amount), Reserved),
+    NewReserved  = Reserved - Refund,
+    NewAvailable = Total    - NewReserved,
+    {NewReserved, NewAvailable}.
 
 %%====================================================================
 %% Internal: findAndModify value extractor
