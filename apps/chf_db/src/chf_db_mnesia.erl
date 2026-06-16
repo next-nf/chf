@@ -57,36 +57,84 @@
 
 -spec init(Opts :: map()) -> ok | {error, term()}.
 init(_Opts) ->
+    %% Find reachable cluster peers.  We ping here so that a node that is
+    %% configured but not yet up is simply skipped (it will join later via its
+    %% own init call or a Mnesia reconnect).
+    %%
+    %% KNOWN LIMITATION — split-brain on simultaneous cold start: the seed/join
+    %% decision below gates on Erlang VM reachability (net_adm:ping), not on
+    %% whether the peer's Mnesia is already running.  If every node in a fresh
+    %% cluster cold-starts at the same instant, two nodes can each see the
+    %% other's VM yet reach change_config/2 before the other's Mnesia exists,
+    %% and each then seeds its own disjoint single-node schema (permanently
+    %% diverged data).  Production boot MUST therefore be ordered: bring up one
+    %% seed node and wait for its Mnesia to be healthy before starting the
+    %% rest.  Automatic seed election / quorum is a later (Phase 2) task.
+    Others = [N || N <- chf_cluster:cluster_nodes(),
+                   N =/= node(),
+                   pong =:= net_adm:ping(N)],
     %% Mnesia schema must be created before mnesia:start().
-    %% Stop mnesia if it happens to be running, create schema, then start.
+    %% Stop mnesia if it is running, then:
+    %%   * No reachable peers → create a single-node schema (seed node).
+    %%   * Reachable peers   → skip local schema creation; we will merge via
+    %%                         change_config(extra_db_nodes, …) after start.
     _ = application:stop(mnesia),
-    case mnesia:create_schema([node()]) of
-        ok               -> ok;
-        {error, {_, {already_exists, _}}} -> ok;
-        {error, SchemaErr} -> error({schema, SchemaErr})
+    case Others of
+        [] ->
+            case mnesia:create_schema([node()]) of
+                ok                            -> ok;
+                {error, {_, {already_exists, _}}} -> ok;
+                {error, SchemaErr}            -> error({schema, SchemaErr})
+            end;
+        _ ->
+            ok
     end,
     ok = application:ensure_started(mnesia),
-    ok = ensure_table(subscriber, record_info(fields, subscriber), disc_copies,
+    %% If we found peers, merge their schema into this node and switch the
+    %% local schema copy to disc so that table definitions survive restarts.
+    case Others of
+        [] -> ok;
+        _  ->
+            {ok, _MergedFrom} = mnesia:change_config(extra_db_nodes, Others),
+            %% Make the local schema disc-resident.  On a fresh join this is a
+            %% ram→disc conversion ({atomic, ok}); on restart with a pre-existing
+            %% disc schema it is already disc_copies ({aborted, already_exists}).
+            %% Anything else (e.g. disc full, permission denied) is a real fault
+            %% that must not be swallowed — fail loudly so we never build tables
+            %% on top of an inconsistent schema.
+            case mnesia:change_table_copy_type(schema, node(), disc_copies) of
+                {atomic, ok}                                       -> ok;
+                {aborted, {already_exists, schema, _, disc_copies}} -> ok;
+                {aborted, TypeErr} -> error({schema_copy_type, TypeErr})
+            end
+    end,
+    ok = ensure_table(subscriber, record_info(fields, subscriber),
                       [{index, [#subscriber.msisdn]}]),
-    ok = ensure_table(balance,    record_info(fields, balance),    disc_copies, []),
-    ok = ensure_table(cdr,        record_info(fields, cdr),        disc_copies, []),
-    ok = ensure_table(charging_session, record_info(fields, charging_session), disc_copies, []),
+    ok = ensure_table(balance,    record_info(fields, balance),    []),
+    ok = ensure_table(cdr,        record_info(fields, cdr),        []),
+    ok = ensure_table(charging_session, record_info(fields, charging_session), []),
     ok = mnesia:wait_for_tables([subscriber, balance, cdr, charging_session], 30000).
 
 %%--------------------------------------------------------------------
-%% Internal helper — create table if it does not already exist.
+%% Internal helper — create table on first node or add local disc_copies
+%% replica when the table was already created by another cluster member.
 %%--------------------------------------------------------------------
--spec ensure_table(atom(), [atom()], disc_copies | ram_copies, list()) -> ok.
-ensure_table(Name, Fields, StorageType, ExtraOpts) ->
-    BaseOpts = [
-        {attributes, Fields},
-        {StorageType, [node()]}
-        | ExtraOpts
-    ],
+-spec ensure_table(atom(), [atom()], list()) -> ok.
+ensure_table(Name, Fields, ExtraOpts) ->
+    BaseOpts = [{attributes, Fields}, {disc_copies, [node()]} | ExtraOpts],
     case mnesia:create_table(Name, BaseOpts) of
-        {atomic, ok}                        -> ok;
-        {aborted, {already_exists, Name}}   -> ok;
-        {aborted, Reason}                   -> error({create_table_failed, Name, Reason})
+        {atomic, ok} ->
+            ok;
+        {aborted, {already_exists, Name}} ->
+            %% Table exists (created by another node).  Add this node as a
+            %% disc_copies replica so transactions are distributed here too.
+            case mnesia:add_table_copy(Name, node(), disc_copies) of
+                {atomic, ok}                         -> ok;
+                {aborted, {already_exists, Name, _}} -> ok;
+                {aborted, AddErr}                    -> error({add_table_copy, Name, AddErr})
+            end;
+        {aborted, Reason} ->
+            error({create_table_failed, Name, Reason})
     end.
 
 %%====================================================================

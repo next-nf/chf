@@ -15,12 +15,16 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_session_sweeper.erl — Periodic sweeper for stale charging sessions.
+%% chf_session_sweeper.erl — Cluster-singleton periodic sweeper for stale sessions.
 %%
-%% Scans the charging_session table for active sessions whose
-%% updated_at timestamp exceeds the idle timeout.  Stale sessions
-%% are terminated via chf_core:session_terminate_if_stale/2 so that
-%% proper balance refunds and CDR finalization occur.
+%% Every node starts this gen_server, but only one node is ACTIVE at a time.
+%% The active node wins global:register_name(chf_session_sweeper, self());
+%% the rest are STANDBY. When a nodedown is received, standby nodes race to
+%% take over via global:register_name. The active node performs the periodic
+%% sweep; standby nodes ignore sweep timer messages.
+%%
+%% Quorum-gating: the active sweeper skips the scan when chf_cluster:in_quorum/0
+%% is false.  A minority-partition node must not terminate or refund sessions.
 -module(chf_session_sweeper).
 -behaviour(gen_server).
 
@@ -28,7 +32,7 @@
 -include_lib("kernel/include/logger.hrl").
 
 -export([start_link/0]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(DEFAULT_IDLE_TIMEOUT, 300000).   %% 5 minutes
 -define(DEFAULT_SWEEP_INTERVAL, 60000).  %% 1 minute
@@ -39,7 +43,9 @@
 
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    %% No local name registration — identity is managed via :global so that
+    %% only one instance is active cluster-wide.
+    gen_server:start_link(?MODULE, [], []).
 
 %%====================================================================
 %% gen_server callbacks
@@ -50,10 +56,15 @@ init([]) ->
                                     ?DEFAULT_SWEEP_INTERVAL),
     IdleTimeout = application:get_env(chf_core, session_idle_timeout,
                                        ?DEFAULT_IDLE_TIMEOUT),
-    ?LOG_INFO("Session sweeper started: interval=~wms idle_timeout=~wms",
-              [Interval, IdleTimeout]),
-    schedule(Interval),
-    {ok, #{interval => Interval, idle_timeout => IdleTimeout}}.
+    %% Monitor node up/down events so standby nodes can attempt takeover.
+    %% Guard for non-distributed CT (nonode@nohost): net_kernel is not running.
+    case node() of
+        nonode@nohost -> ok;
+        _             -> net_kernel:monitor_nodes(true)
+    end,
+    State0 = #{interval => Interval, idle_timeout => IdleTimeout, active => false},
+    State1 = try_become_active(State0),
+    {ok, State1}.
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -61,30 +72,70 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info(sweep, #{interval := Interval, idle_timeout := IdleTimeout} = State) ->
+%% Active node: run the sweep, then reschedule.
+handle_info(sweep, #{active := true, interval := Interval, idle_timeout := IdleTimeout} = State) ->
     sweep(IdleTimeout),
     schedule(Interval),
     {noreply, State};
+%% Standby node: ignore stray sweep timer (fired before we went standby, or
+%% scheduled by a previous active run).
+handle_info(sweep, State) ->
+    {noreply, State};
+%% A node went down — if we are standby, race to become the new active.
+handle_info({nodedown, _N}, #{active := false} = State) ->
+    {noreply, try_become_active(State)};
+handle_info({nodedown, _N}, State) ->
+    {noreply, State};
+handle_info({nodeup, _N}, State) ->
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
+
+terminate(_Reason, _State) ->
+    %% Stop monitoring nodes on a non-distributed node (guard avoids badarg).
+    case node() of
+        nonode@nohost -> ok;
+        _             -> net_kernel:monitor_nodes(false)
+    end,
+    ok.
 
 %%====================================================================
 %% Internal
 %%====================================================================
 
+%% Try to register globally as the active sweeper.  If we win, schedule the
+%% first sweep; if we lose (another node already holds the name), stay standby.
+try_become_active(#{interval := Interval} = State) ->
+    case global:register_name(chf_session_sweeper, self()) of
+        yes ->
+            ?LOG_INFO("Session sweeper ACTIVE on ~p: interval=~wms idle_timeout=~wms",
+                      [node(), Interval, maps:get(idle_timeout, State)]),
+            schedule(Interval),
+            State#{active => true};
+        no ->
+            ?LOG_INFO("Session sweeper STANDBY on ~p", [node()]),
+            State#{active => false}
+    end.
+
 schedule(Interval) ->
     erlang:send_after(Interval, self(), sweep).
 
 sweep(MaxAge) ->
-    case chf_db:session_list_active() of
-        {ok, Sessions} ->
-            lists:foreach(fun(#charging_session{session_id = SId}) ->
-                case chf_core:session_terminate_if_stale(SId, MaxAge) of
-                    ok      -> ?LOG_INFO("Sweeper: terminated stale session ~s", [SId]);
-                    skipped -> ok;
-                    _Other  -> ok
-                end
-            end, Sessions);
-        _Error ->
-            ok
+    case chf_cluster:in_quorum() of
+        false ->
+            ?LOG_DEBUG("Session sweeper: skipping scan (not in quorum)"),
+            ok;
+        true ->
+            case chf_db:session_list_active() of
+                {ok, Sessions} ->
+                    lists:foreach(fun(#charging_session{session_id = SId}) ->
+                        case chf_core:session_terminate_if_stale(SId, MaxAge) of
+                            ok      -> ?LOG_INFO("Sweeper: terminated stale session ~s", [SId]);
+                            skipped -> ok;
+                            _Other  -> ok
+                        end
+                    end, Sessions);
+                _Error ->
+                    ok
+            end
     end.

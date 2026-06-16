@@ -247,6 +247,7 @@ ensure_imsi(_, _) ->
 %% Error code mapping
 %%====================================================================
 
+error_code(no_quorum)            -> ?'DIAMETER_BASE_RESULT-CODE_TOO_BUSY';
 error_code(subscriber_not_found) -> ?'RESULT-CODE_USER_UNKNOWN';
 %% TS 32.299: a suspended/terminated end-user maps to END_USER_SERVICE_DENIED
 %% (4010), not the generic UNABLE_TO_COMPLY (5012).

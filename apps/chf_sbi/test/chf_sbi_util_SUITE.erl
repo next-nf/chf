@@ -15,27 +15,17 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
--module(chf_db_sup).
--behaviour(supervisor).
+%% chf_sbi_util_SUITE.erl — Unit tests for chf_sbi_util helpers.
+-module(chf_sbi_util_SUITE).
+-compile(export_all).
 
--export([start_link/0]).
--export([init/1]).
+-include_lib("eunit/include/eunit.hrl").
+-include_lib("common_test/include/ct.hrl").
 
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+all() -> [ref_is_node_tagged_and_unique].
 
-init([]) ->
-    SupFlags = #{
-        strategy  => one_for_one,
-        intensity => 5,
-        period    => 10
-    },
-    Children = [
-        #{id       => chf_cluster,
-          start    => {chf_cluster, start_link, []},
-          restart  => permanent,
-          shutdown => 5000,
-          type     => worker,
-          modules  => [chf_cluster]}
-    ],
-    {ok, {SupFlags, Children}}.
+ref_is_node_tagged_and_unique(_) ->
+    R = chf_sbi_util:generate_ref(),
+    NodeBin = atom_to_binary(node(), utf8),
+    ?assertMatch({0, _}, binary:match(R, NodeBin)),
+    ?assertNotEqual(R, chf_sbi_util:generate_ref()).
