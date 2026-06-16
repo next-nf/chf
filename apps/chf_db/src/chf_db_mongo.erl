@@ -15,43 +15,35 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_db_mongo.erl — MongoDB backend for chf_db.
+%% chf_db_mongo.erl — MongoDB backend for chf_db, implementing the
+%% chf_db_backend behaviour (all 23 callbacks).
 %%
-%% This module implements subscriber CRUD, session store/lookup/delete/list_active,
-%% cdr_write/1, and cdr_list/1.  Balance ops and transactions are delivered in
-%% subsequent tasks.
+%% Connection ownership and supervision
+%% -------------------------------------
+%% mongoc:connect/3 calls mc_topology:start_link internally, which links the
+%% topology gen_server to the calling process.  To prevent the topology from
+%% dying when the short-lived init/1 caller exits, the connection is owned by
+%% chf_db_mongo_conn (a gen_server registered as chf_db_mongo_conn).
 %%
-%% NOTE: -behaviour(chf_db_backend) is intentionally NOT declared here.
-%% chf_db_backend declares 23 callbacks; this file implements only a subset.
-%% Declaring the behaviour now would emit "callback missing" warnings for the
-%% unimplemented ones, which fails the build under warnings_as_errors.
-%% The attribute is added when the final callback is delivered.
+%% In a production node chf_db_mongo_conn is a supervised child of chf_db_sup
+%% (added only when the configured backend is chf_db_mongo).  If the topology
+%% gen_server crashes, chf_db_mongo_conn receives the EXIT signal (it traps
+%% exits), returns {stop, topology_down, ...} and the supervisor restarts it;
+%% the new instance calls mongoc:connect/3 to re-establish the connection.
 %%
-%% Supervision note: mongoc:connect/3 uses mc_topology:start_link internally,
-%% which links the topology gen_server to the calling process. If the caller
-%% exits, the topology dies too. To prevent this, init/1 spawns a dedicated
-%% keeper process (registered as chf_db_mongo_keeper) that owns the link. The
-%% keeper traps exits so a topology crash does not kill it.
-%%
-%% LIMITATION (skeleton phase): the keeper is NOT yet under chf_db_sup, so it is
-%% not restarted if it crashes, and a topology crash leaves a stale Pid in
-%% persistent_term. The next task moves the keeper to a supervised gen_server
-%% child of chf_db_sup so the supervisor owns the link and can heal the
-%% connection (disconnect + reconnect) on restart. For the current ops-free
-%% skeleton this is adequate: init/1 runs once at app/CT start in a clean node.
-%% To bound the latent leak, init/1 tears down any pre-existing keeper before
-%% spawning a fresh one (see do_connect/4), so repeated init/1 calls do not
-%% accumulate orphan keepers.
-%%
-%% In production the keeper is started by chf_db_mongo:init/1, called from
-%% chf_db_app:start/2 (the long-lived application master process).
+%% init/1 delegates to chf_db_mongo_conn:ensure_started/0, which is idempotent:
+%%   • In production (gen_server already alive from the supervisor): a no-op
+%%     re-run of ensure_indexes so per-testcase collection drops get fresh indexes.
+%%   • In tests (no supervisor): starts the gen_server as a standalone process.
 -module(chf_db_mongo).
+-behaviour(chf_db_backend).
 
 -include_lib("chf_db/include/chf_db.hrl").
 
 -export([
     init/1,
     topology/0,
+    ensure_indexes/1,
     %% Subscriber
     subscriber_create/1,
     subscriber_lookup/1,
@@ -95,37 +87,19 @@
 %% Public API — init / topology
 %%====================================================================
 
-%% init/1 — Connect to the MongoDB replica set, store the topology in
-%% persistent_term, and ensure all required indexes exist.
+%% init/1 — Ensure the supervised MongoDB connection gen_server is running
+%% and indexes exist.
 %%
-%% Reads configuration from the {chf_db, mongo, Cfg} application env.
-%% Defaults: host "127.0.0.1", port 27017, replset <<"rs0">>,
-%%           database <<"chf">>, pool_size 5.
+%% In a production node chf_db_mongo_conn is already alive (started by
+%% chf_db_sup before init/1 is called), so this is an idempotent no-op
+%% that re-runs ensure_indexes (useful after per-test-case collection drops).
+%%
+%% In CT suites that call init/1 directly (without starting the chf_db
+%% application), chf_db_mongo_conn:ensure_started/0 starts the gen_server
+%% as a standalone process.
 -spec init(map()) -> ok | {error, term()}.
 init(_Opts) ->
-    Cfg      = application:get_env(chf_db, mongo, #{}),
-    Host     = maps:get(host,      Cfg, "127.0.0.1"),
-    Port     = maps:get(port,      Cfg, 27017),
-    ReplSet  = maps:get(replset,   Cfg, <<"rs0">>),
-    Database = maps:get(database,  Cfg, <<"chf">>),
-    PoolSize = maps:get(pool_size, Cfg, 5),
-
-    HostStr = Host ++ ":" ++ integer_to_list(Port),
-
-    %% If a topology is already registered (e.g. re-init in the same node),
-    %% reuse it rather than spawning a second supervisor under the same name.
-    case whereis(chf_db_mongo_pool) of
-        Existing when is_pid(Existing), node(Existing) =:= node() ->
-            case is_process_alive(Existing) of
-                true ->
-                    persistent_term:put({chf_db_mongo, topology}, Existing),
-                    ensure_indexes(Existing);
-                false ->
-                    do_connect(ReplSet, HostStr, PoolSize, Database)
-            end;
-        _ ->
-            do_connect(ReplSet, HostStr, PoolSize, Database)
-    end.
+    chf_db_mongo_conn:ensure_started().
 
 %% topology/0 — Return the stored topology handle (pid or registered name).
 -spec topology() -> pid() | atom().
@@ -619,7 +593,7 @@ do_session_transaction(SessionId, Fun, RetriesLeft) ->
         Ctx = #{worker => W, lsid => Lsid, txn => TxnNumber},
 
         %% Step 4: Call the user-supplied Fun.
-        case Fun(Ctx, Session) of
+        FunResult = case Fun(Ctx, Session) of
             {commit, NewSession, Result} ->
                 %% Write the session doc inside the transaction.
                 Doc = chf_db_mongo_codec:from_session(NewSession),
@@ -633,7 +607,11 @@ do_session_transaction(SessionId, Fun, RetriesLeft) ->
             {abort, Reason} ->
                 abort_txn(W, Lsid, TxnNumber),
                 {error, Reason}
-        end
+        end,
+        %% Step 5: Best-effort endSessions so the server session is released
+        %% immediately rather than accumulating until the 30-minute timeout.
+        _ = (catch mc_worker_api:command(W, {<<"endSessions">>, [Lsid]})),
+        FunResult
     end, 30000)
     catch
         error:{bad_query, #{<<"errorLabels">> := Labels} = _Reply}
@@ -947,86 +925,6 @@ build_cdr_selector(Filters) ->
 type_to_bin(online)    -> <<"online">>;
 type_to_bin(offline)   -> <<"offline">>;
 type_to_bin(converged) -> <<"converged">>.
-
-%%====================================================================
-%% Internal: keeper process
-%%====================================================================
-
-%% do_connect/4 — Tear down any prior keeper, spawn a fresh keeper, connect from
-%% the keeper's context (so mc_topology:start_link's link is owned by the keeper,
-%% not by the short-lived init/1 caller), then store the topology.
--spec do_connect(binary(), string(), pos_integer(), binary()) -> ok | {error, term()}.
-do_connect(ReplSet, HostStr, PoolSize, Database) ->
-    %% Kill any pre-existing keeper so re-init does not leak orphan keepers.
-    %% The keeper owns the link to the old topology, so killing it also brings
-    %% the old topology down, freeing the chf_db_mongo_pool name for re-use.
-    stop_keeper(),
-    Caller = self(),
-    Keeper = spawn(fun() ->
-        process_flag(trap_exit, true),
-        catch register(chf_db_mongo_keeper, self()),
-        ConnResult = mongoc:connect(
-            {rs, ReplSet, [HostStr]},
-            [{name, chf_db_mongo_pool}, {register, chf_db_mongo_pool}, {pool_size, PoolSize}],
-            [{database, Database}]
-        ),
-        Caller ! {connect_result, self(), ConnResult},
-        keeper_loop()
-    end),
-    receive
-        {connect_result, Keeper, {ok, Topology}} ->
-            persistent_term:put({chf_db_mongo, topology}, Topology),
-            case ensure_indexes(Topology) of
-                ok ->
-                    ok;
-                {error, _} = Err ->
-                    %% Index setup failed — do not leave the keeper/topology
-                    %% dangling when the app start is going to fail.
-                    persistent_term:erase({chf_db_mongo, topology}),
-                    stop_keeper(),
-                    Err
-            end;
-        {connect_result, Keeper, {error, Reason}} ->
-            stop_keeper(Keeper),
-            {error, Reason}
-    after 30000 ->
-        stop_keeper(Keeper),
-        {error, connect_timeout}
-    end.
-
-%% keeper_loop/0 — Long-lived process that owns the link to the mc_topology
-%% gen_server. Trapping exits means a topology crash does not kill the keeper.
-keeper_loop() ->
-    receive
-        {'EXIT', _Pid, _Reason} ->
-            %% Topology died; stay alive (see module-level LIMITATION note).
-            keeper_loop();
-        stop ->
-            ok;
-        _ ->
-            keeper_loop()
-    end.
-
-%% stop_keeper/0 — Synchronously tear down the registered keeper (if any),
-%% waiting for it to actually exit so its registered names are released before
-%% the caller re-registers them.
--spec stop_keeper() -> ok.
-stop_keeper() ->
-    case whereis(chf_db_mongo_keeper) of
-        undefined -> ok;
-        Pid       -> stop_keeper(Pid)
-    end.
-
--spec stop_keeper(pid()) -> ok.
-stop_keeper(Pid) when is_pid(Pid) ->
-    Ref = monitor(process, Pid),
-    exit(Pid, shutdown),
-    receive
-        {'DOWN', Ref, process, Pid, _} -> ok
-    after 5000 ->
-        demonitor(Ref, [flush]),
-        ok
-    end.
 
 %%====================================================================
 %% Internal: index management

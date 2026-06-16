@@ -30,7 +30,18 @@ init([]) ->
         intensity => 5,
         period    => 10
     },
-    Children = [
+    MongoChild = case application:get_env(chf_db, backend, chf_db_mnesia) of
+        chf_db_mongo ->
+            [#{id       => chf_db_mongo_conn,
+               start    => {chf_db_mongo_conn, start_link, []},
+               restart  => permanent,
+               shutdown => 5000,
+               type     => worker,
+               modules  => [chf_db_mongo_conn]}];
+        _ ->
+            []
+    end,
+    Children = MongoChild ++ [
         #{id       => chf_cluster,
           start    => {chf_cluster, start_link, []},
           restart  => permanent,
