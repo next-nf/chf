@@ -31,7 +31,26 @@ all() ->
      subscriber_crud,
      session_store_lookup_delete,
      session_list_active_filters,
-     cdr_write_and_list].
+     cdr_write_and_list,
+     %% Balance parity tests (mirror chf_db_balance_SUITE exactly)
+     balance_reserve_up_to_full,
+     balance_reserve_up_to_partial,
+     balance_reserve_up_to_zero_available,
+     balance_reserve_up_to_missing,
+     balance_reserve_up_to_negative,
+     balance_reserve_ok,
+     balance_reserve_insufficient,
+     balance_reserve_missing,
+     balance_commit_clamp,
+     balance_refund_clamp,
+     balance_topup_negative_rejected,
+     balance_topup_zero_creates_row,
+     balance_topup_adds,
+     balance_set_total_absolute,
+     balance_set_total_below_reserved,
+     balance_set_total_fresh_acct,
+     balance_get_found,
+     balance_get_missing].
 
 %%--------------------------------------------------------------------
 %% Suite init/end
@@ -157,8 +176,133 @@ cdr_write_and_list(_Config) ->
     ?assertEqual(2, length(L)).
 
 %%--------------------------------------------------------------------
+%% Balance parity test cases — mirror chf_db_balance_SUITE values exactly
+%%--------------------------------------------------------------------
+
+balance_reserve_up_to_full(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 1000, 0),
+    {ok, Granted, B} = chf_db_mongo:balance_reserve_up_to(<<"acc">>, 400),
+    ?assertEqual(400, Granted),
+    ?assertEqual(400, B#balance.reserved),
+    ?assertEqual(600, B#balance.available).
+
+balance_reserve_up_to_partial(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 300, 0),
+    {ok, Granted, B} = chf_db_mongo:balance_reserve_up_to(<<"acc">>, 1000),
+    ?assertEqual(300, Granted),
+    ?assertEqual(300, B#balance.reserved),
+    ?assertEqual(0,   B#balance.available).
+
+balance_reserve_up_to_zero_available(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 100),
+    {ok, Granted, B} = chf_db_mongo:balance_reserve_up_to(<<"acc">>, 500),
+    ?assertEqual(0,   Granted),
+    ?assertEqual(100, B#balance.reserved),
+    ?assertEqual(0,   B#balance.available).
+
+balance_reserve_up_to_missing(_Config) ->
+    ?assertEqual({error, not_found},
+                 chf_db_mongo:balance_reserve_up_to(<<"missing">>, 100)).
+
+balance_reserve_up_to_negative(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 0),
+    ?assertEqual({error, invalid_amount},
+                 chf_db_mongo:balance_reserve_up_to(<<"acc">>, -5)).
+
+balance_reserve_ok(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 1000, 0),
+    {ok, B} = chf_db_mongo:balance_reserve(<<"acc">>, 400),
+    ?assertEqual(400, B#balance.reserved),
+    ?assertEqual(600, B#balance.available).
+
+balance_reserve_insufficient(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 0),
+    ?assertEqual({error, insufficient_balance},
+                 chf_db_mongo:balance_reserve(<<"acc">>, 500)).
+
+balance_reserve_missing(_Config) ->
+    ?assertEqual({error, not_found},
+                 chf_db_mongo:balance_reserve(<<"missing">>, 1)).
+
+balance_commit_clamp(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 50),
+    {ok, B} = chf_db_mongo:balance_commit(<<"acc">>, 80),
+    ?assertEqual(50, B#balance.total),
+    ?assertEqual(0,  B#balance.reserved),
+    ?assertEqual(50, B#balance.available).
+
+balance_refund_clamp(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 10),
+    {ok, B} = chf_db_mongo:balance_refund(<<"acc">>, 50),
+    ?assertEqual(100, B#balance.total),
+    ?assertEqual(0,   B#balance.reserved),
+    ?assertEqual(100, B#balance.available).
+
+balance_topup_negative_rejected(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 0),
+    ?assertEqual({error, invalid_amount},
+                 chf_db_mongo:balance_topup(<<"acc">>, -50)),
+    {ok, B} = chf_db_mongo:balance_get(<<"acc">>),
+    ?assertEqual(100, B#balance.total).
+
+balance_topup_zero_creates_row(_Config) ->
+    {ok, B} = chf_db_mongo:balance_topup(<<"newacct">>, 0),
+    ?assertEqual(0, B#balance.total),
+    ?assertEqual(0, B#balance.reserved),
+    ?assertEqual(0, B#balance.available).
+
+balance_topup_adds(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 30),
+    {ok, B} = chf_db_mongo:balance_topup(<<"acc">>, 200),
+    ?assertEqual(300, B#balance.total),
+    ?assertEqual(30,  B#balance.reserved),
+    ?assertEqual(270, B#balance.available).
+
+balance_set_total_absolute(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 30),
+    {ok, B} = chf_db_mongo:balance_set_total(<<"acc">>, 200),
+    ?assertEqual(200, B#balance.total),
+    ?assertEqual(30,  B#balance.reserved),
+    ?assertEqual(170, B#balance.available).
+
+balance_set_total_below_reserved(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 30),
+    ?assertEqual({error, total_below_reserved},
+                 chf_db_mongo:balance_set_total(<<"acc">>, 10)).
+
+balance_set_total_fresh_acct(_Config) ->
+    {ok, B} = chf_db_mongo:balance_set_total(<<"fresh">>, 500),
+    ?assertEqual(500, B#balance.total),
+    ?assertEqual(0,   B#balance.reserved),
+    ?assertEqual(500, B#balance.available).
+
+balance_get_found(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 30),
+    {ok, B} = chf_db_mongo:balance_get(<<"acc">>),
+    ?assertEqual(100, B#balance.total),
+    ?assertEqual(30,  B#balance.reserved),
+    ?assertEqual(70,  B#balance.available).
+
+balance_get_missing(_Config) ->
+    ?assertEqual({error, not_found},
+                 chf_db_mongo:balance_get(<<"missing">>)).
+
+%%--------------------------------------------------------------------
 %% Internal helpers
 %%--------------------------------------------------------------------
+
+%% seed_balance_mongo/3 — insert a balance doc directly for test setup.
+seed_balance_mongo(AccountId, Total, Reserved) ->
+    B = #balance{account_id = AccountId,
+                 total      = Total,
+                 reserved   = Reserved,
+                 available  = Total - Reserved},
+    Doc = chf_db_mongo_codec:from_balance(B),
+    Topology = chf_db_mongo:topology(),
+    mongoc:transaction(Topology, fun(#{pool := W}) ->
+        mc_worker_api:insert(W, <<"balances">>, Doc)
+    end, #{}),
+    ok.
 
 mk_session(Id, State) ->
     #charging_session{

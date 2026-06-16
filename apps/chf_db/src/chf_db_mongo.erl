@@ -57,6 +57,14 @@
     subscriber_lookup/1,
     subscriber_update/1,
     subscriber_delete/1,
+    %% Balance
+    balance_get/1,
+    balance_topup/2,
+    balance_reserve/2,
+    balance_reserve_up_to/2,
+    balance_commit/2,
+    balance_refund/2,
+    balance_set_total/2,
     %% Session
     session_store/1,
     session_lookup/1,
@@ -180,6 +188,283 @@ subscriber_delete(Imsi) ->
     end).
 
 %%====================================================================
+%% Public API — Balance operations
+%%====================================================================
+
+%% balance_get/1 — Return the current balance for an account.
+-spec balance_get(binary()) -> {ok, #balance{}} | {error, not_found}.
+balance_get(AccountId) ->
+    case with_worker(fun(W) ->
+        mc_worker_api:find_one(W, ?BALANCES, #{<<"_id">> => AccountId})
+    end) of
+        undefined -> {error, not_found};
+        Doc       -> {ok, chf_db_mongo_codec:to_balance(Doc)}
+    end.
+
+%% balance_topup/2 — Add Amount to total; upsert the document if absent.
+%% Amount < 0 → {error, invalid_amount}. Amount = 0 on a missing account creates
+%% a zero row (mirrors Mnesia). Uses aggregation pipeline so that ifNull handles
+%% missing fields on upsert; int64 arithmetic throughout.
+-spec balance_topup(binary(), integer()) -> {ok, #balance{}} | {error, invalid_amount}.
+balance_topup(_AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
+balance_topup(AccountId, Amount) ->
+    %% Pipeline:
+    %%   total     = {$toLong: {$add: [{$ifNull: ["$total",    0]}, Amount]}}
+    %%   reserved  = {$toLong: {$ifNull: ["$reserved", 0]}}
+    %%   available = {$toLong: {$subtract: ["$total", "$reserved"]}}
+    %%
+    %% Note: $add / $subtract on int64 fields stays int64 in MongoDB.
+    %% $toLong is a belt-and-suspenders guard in case the driver or Mongo
+    %% ever coerces small values to int32 — it forces BSON int64 on the way out.
+    Pipeline = [
+        #{<<"$set">> => #{
+            <<"total">>     => #{<<"$toLong">> => #{<<"$add">> => [
+                                    #{<<"$ifNull">> => [<<"$total">>, 0]},
+                                    Amount]}},
+            <<"reserved">>  => #{<<"$toLong">> => #{<<"$ifNull">> => [<<"$reserved">>,  0]}},
+            <<"available">> => <<"$$REMOVE">>   %% placeholder; recomputed below
+        }},
+        #{<<"$set">> => #{
+            <<"available">> => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$total">>, <<"$reserved">>]}}
+        }}
+    ],
+    Cmd = {<<"findAndModify">>, ?BALANCES,
+           <<"query">>,  #{<<"_id">> => AccountId},
+           <<"update">>, Pipeline,
+           <<"upsert">>, true,
+           <<"new">>,    true},
+    {true, Reply} = with_worker(fun(W) -> mc_worker_api:command(W, Cmd) end),
+    case fam_value(Reply) of
+        no_doc ->
+            %% Some MongoDB versions return null for value even on a successful upsert
+            %% with new:true (observed with the Erlang driver). Fall back to find_one.
+            ExistDoc = with_worker(fun(W) ->
+                mc_worker_api:find_one(W, ?BALANCES, #{<<"_id">> => AccountId})
+            end),
+            {ok, chf_db_mongo_codec:to_balance(ExistDoc)};
+        Doc ->
+            {ok, chf_db_mongo_codec:to_balance(Doc)}
+    end.
+
+%% balance_reserve/2 — All-or-nothing reserve: deduct Amount from available.
+%% Amount < 0 → {error, invalid_amount}. Missing doc → {error, not_found}.
+%% available < Amount → {error, insufficient_balance}.
+-spec balance_reserve(binary(), integer()) ->
+    {ok, #balance{}} | {error, not_found | insufficient_balance | invalid_amount}.
+balance_reserve(_AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
+balance_reserve(AccountId, Amount) ->
+    %% Query includes "available >= Amount" so the findAndModify only fires
+    %% when there is enough balance. On null reply, distinguish not_found vs
+    %% insufficient_balance with a follow-up find_one.
+    Pipeline = [
+        #{<<"$set">> => #{
+            <<"reserved">>  => #{<<"$toLong">> => #{<<"$add">>      => [<<"$reserved">>, Amount]}},
+            <<"available">> => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$available">>, Amount]}}
+        }}
+    ],
+    Cmd = {<<"findAndModify">>, ?BALANCES,
+           <<"query">>,  #{<<"_id">> => AccountId, <<"available">> => #{<<"$gte">> => Amount}},
+           <<"update">>, Pipeline,
+           <<"new">>,    true},
+    {true, Reply} = with_worker(fun(W) -> mc_worker_api:command(W, Cmd) end),
+    case fam_value(Reply) of
+        no_doc ->
+            %% Query didn't match — either doc absent or available < Amount.
+            case with_worker(fun(W) ->
+                mc_worker_api:find_one(W, ?BALANCES, #{<<"_id">> => AccountId})
+            end) of
+                undefined -> {error, not_found};
+                _Doc      -> {error, insufficient_balance}
+            end;
+        Doc ->
+            {ok, chf_db_mongo_codec:to_balance(Doc)}
+    end.
+
+%% balance_reserve_up_to/2 — Best-effort reserve: grant min(Amount, max(0, available)).
+%% Amount < 0 → {error, invalid_amount}. Missing doc → {error, not_found}.
+-spec balance_reserve_up_to(binary(), integer()) ->
+    {ok, non_neg_integer(), #balance{}} | {error, not_found | invalid_amount}.
+balance_reserve_up_to(_AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
+balance_reserve_up_to(AccountId, Amount) ->
+    %% Strategy: fetch the BEFORE image (new:false), compute Granted on the
+    %% Erlang side, then apply the update. This avoids a second round-trip
+    %% while keeping the arithmetic simple and verifiable.
+    %%
+    %% The pipeline adds $min[Amount, $max[0, $available]] to reserved and
+    %% recomputes available = total - reserved. We still need the before-doc
+    %% to know the Granted value. We fetch the before image (new:false) and
+    %% compute Granted = min(Amount, max(0, Before.available)).
+    Pipeline = [
+        #{<<"$set">> => #{
+            <<"reserved">>  => #{<<"$toLong">> => #{<<"$add">> => [
+                                    <<"$reserved">>,
+                                    #{<<"$min">> => [Amount,
+                                                     #{<<"$max">> => [0, <<"$available">>]}]}
+                                    ]}},
+            <<"available">> => <<"$$REMOVE">>
+        }},
+        #{<<"$set">> => #{
+            <<"available">> => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$total">>, <<"$reserved">>]}}
+        }}
+    ],
+    Cmd = {<<"findAndModify">>, ?BALANCES,
+           <<"query">>,  #{<<"_id">> => AccountId},
+           <<"update">>, Pipeline,
+           <<"new">>,    false},   %% BEFORE image
+    {true, Reply} = with_worker(fun(W) -> mc_worker_api:command(W, Cmd) end),
+    case fam_value(Reply) of
+        no_doc ->
+            {error, not_found};
+        BeforeDoc ->
+            Before = chf_db_mongo_codec:to_balance(BeforeDoc),
+            Granted = min(Amount, max(0, Before#balance.available)),
+            NewReserved  = Before#balance.reserved + Granted,
+            NewAvailable = Before#balance.total - NewReserved,
+            Post = Before#balance{reserved  = NewReserved,
+                                  available = NewAvailable},
+            {ok, Granted, Post}
+    end.
+
+%% balance_commit/2 — Commit up to Amount (clamped to reserved); deduct from
+%% both reserved and total. Mirrors Mnesia: never commits more than is reserved.
+-spec balance_commit(binary(), integer()) -> {ok, #balance{}} | {error, not_found}.
+balance_commit(AccountId, Amount) ->
+    %% Commit = min(max(0, Amount), reserved)
+    %% new_reserved = reserved - Commit
+    %% new_total    = total    - Commit
+    %% available    = new_total - new_reserved
+    Pipeline = [
+        #{<<"$set">> => #{
+            <<"_commit">> => #{<<"$min">> => [#{<<"$max">> => [0, Amount]}, <<"$reserved">>]}
+        }},
+        #{<<"$set">> => #{
+            <<"reserved">>  => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$reserved">>, <<"$_commit">>]}},
+            <<"total">>     => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$total">>,    <<"$_commit">>]}},
+            <<"available">> => <<"$$REMOVE">>
+        }},
+        #{<<"$set">> => #{
+            <<"available">> => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$total">>, <<"$reserved">>]}}
+        }},
+        #{<<"$unset">> => <<"_commit">>}
+    ],
+    Cmd = {<<"findAndModify">>, ?BALANCES,
+           <<"query">>,  #{<<"_id">> => AccountId},
+           <<"update">>, Pipeline,
+           <<"new">>,    true},
+    {true, Reply} = with_worker(fun(W) -> mc_worker_api:command(W, Cmd) end),
+    case fam_value(Reply) of
+        no_doc -> {error, not_found};
+        Doc    -> {ok, chf_db_mongo_codec:to_balance(Doc)}
+    end.
+
+%% balance_refund/2 — Return Amount back from reserved to available (clamped to
+%% reserved). Total is unchanged.
+-spec balance_refund(binary(), integer()) -> {ok, #balance{}} | {error, not_found}.
+balance_refund(AccountId, Amount) ->
+    %% Refund = min(max(0, Amount), reserved)
+    %% new_reserved = reserved - Refund
+    %% available    = total    - new_reserved
+    Pipeline = [
+        #{<<"$set">> => #{
+            <<"_refund">> => #{<<"$min">> => [#{<<"$max">> => [0, Amount]}, <<"$reserved">>]}
+        }},
+        #{<<"$set">> => #{
+            <<"reserved">>  => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$reserved">>, <<"$_refund">>]}},
+            <<"available">> => <<"$$REMOVE">>
+        }},
+        #{<<"$set">> => #{
+            <<"available">> => #{<<"$toLong">> => #{<<"$subtract">> => [<<"$total">>, <<"$reserved">>]}}
+        }},
+        #{<<"$unset">> => <<"_refund">>}
+    ],
+    Cmd = {<<"findAndModify">>, ?BALANCES,
+           <<"query">>,  #{<<"_id">> => AccountId},
+           <<"update">>, Pipeline,
+           <<"new">>,    true},
+    {true, Reply} = with_worker(fun(W) -> mc_worker_api:command(W, Cmd) end),
+    case fam_value(Reply) of
+        no_doc -> {error, not_found};
+        Doc    -> {ok, chf_db_mongo_codec:to_balance(Doc)}
+    end.
+
+%% balance_set_total/2 — Set total to an absolute NewTotal, preserving reserved.
+%% NewTotal < reserved → {error, total_below_reserved}.
+%% Upserts (creates) a fresh account if absent (reserved defaults to 0).
+%%
+%% Implementation note: we cannot use upsert:true with a query that includes a
+%% reserved constraint, because when the doc EXISTS but reserved > NewTotal
+%% (query miss), MongoDB will try to INSERT a new doc with the same _id and
+%% produce a DuplicateKey error. We therefore use a two-step approach:
+%%
+%%   Step 1: findAndModify with upsert:false, query _id + reserved<=NewTotal.
+%%           Handles the "existing doc, constraint satisfied" fast path.
+%%   Step 2 (only on null reply): check whether the doc exists at all.
+%%           • Absent → upsert a fresh doc with reserved=0 (always ok if NewTotal>=0).
+%%           • Present → reserved > NewTotal → {error, total_below_reserved}.
+-spec balance_set_total(binary(), integer()) ->
+    {ok, #balance{}} | {error, total_below_reserved}.
+balance_set_total(AccountId, NewTotal) ->
+    Pipeline = [
+        #{<<"$set">> => #{
+            <<"total">>     => NewTotal,
+            <<"reserved">>  => #{<<"$toLong">> => #{<<"$ifNull">> => [<<"$reserved">>, 0]}},
+            <<"available">> => <<"$$REMOVE">>
+        }},
+        #{<<"$set">> => #{
+            <<"available">> => #{<<"$toLong">> => #{<<"$subtract">> => [NewTotal, <<"$reserved">>]}}
+        }}
+    ],
+    %% Step 1: Update existing doc if reserved <= NewTotal.
+    Cmd1 = {<<"findAndModify">>, ?BALANCES,
+            <<"query">>,  #{<<"_id">>      => AccountId,
+                            <<"reserved">> => #{<<"$lte">> => NewTotal}},
+            <<"update">>, Pipeline,
+            <<"new">>,    true},
+    {true, Reply1} = with_worker(fun(W) -> mc_worker_api:command(W, Cmd1) end),
+    case fam_value(Reply1) of
+        no_doc ->
+            %% Step 2: Doc not found OR reserved > NewTotal.
+            %% Distinguish by checking existence.
+            case with_worker(fun(W) ->
+                mc_worker_api:find_one(W, ?BALANCES, #{<<"_id">> => AccountId})
+            end) of
+                undefined ->
+                    %% Fresh account: upsert with reserved defaulting to 0.
+                    UpsertPipeline = [
+                        #{<<"$set">> => #{
+                            <<"total">>     => NewTotal,
+                            <<"reserved">>  => 0,
+                            <<"available">> => NewTotal
+                        }}
+                    ],
+                    Cmd2 = {<<"findAndModify">>, ?BALANCES,
+                            <<"query">>,  #{<<"_id">> => AccountId},
+                            <<"update">>, UpsertPipeline,
+                            <<"upsert">>, true,
+                            <<"new">>,    true},
+                    {true, Reply2} = with_worker(fun(W) -> mc_worker_api:command(W, Cmd2) end),
+                    case fam_value(Reply2) of
+                        no_doc ->
+                            %% Upsert with new:true returned null — retrieve via find_one.
+                            ExistDoc = with_worker(fun(W) ->
+                                mc_worker_api:find_one(W, ?BALANCES, #{<<"_id">> => AccountId})
+                            end),
+                            {ok, chf_db_mongo_codec:to_balance(ExistDoc)};
+                        Doc2 ->
+                            {ok, chf_db_mongo_codec:to_balance(Doc2)}
+                    end;
+                _ExistingDoc ->
+                    %% Doc exists but reserved > NewTotal.
+                    {error, total_below_reserved}
+            end;
+        Doc ->
+            {ok, chf_db_mongo_codec:to_balance(Doc)}
+    end.
+
+%%====================================================================
 %% Public API — Session persistence
 %%====================================================================
 
@@ -276,6 +561,24 @@ with_worker(Fun) ->
     mongoc:transaction(topology(), fun(#{pool := W}) ->
         Fun(W)
     end, #{}).
+
+%%====================================================================
+%% Internal: findAndModify value extractor
+%%====================================================================
+
+%% fam_value/1 — Extract the document from a findAndModify reply map.
+%%
+%% The MongoDB driver encodes a missing/null document in the "value" field
+%% using the atom `null` (standard BSON null) or, in some reply paths, the
+%% atom `undefined`. Both are treated as "no document matched/returned".
+%% Any other term is the BSON document map.
+-spec fam_value(map()) -> map() | no_doc.
+fam_value(Reply) ->
+    case maps:get(<<"value">>, Reply, undefined) of
+        null      -> no_doc;
+        undefined -> no_doc;
+        Doc       -> Doc
+    end.
 
 %%====================================================================
 %% Internal: CDR selector builder
