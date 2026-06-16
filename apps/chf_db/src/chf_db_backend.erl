@@ -61,9 +61,14 @@
 %%     write lock on the record before reading it.  Mnesia serializes
 %%     conflicting transactions cluster-wide, so no two nodes can commit
 %%     overlapping changes to the same record simultaneously.
-%%   - disc_copies replicas on every cluster node:  every committed
-%%     transaction is synchronously written to all replicas before returning,
-%%     so there is no stale-read window between nodes.
+%%   - disc_copies replicas on every cluster node:  each commit is
+%%     acknowledged by all participating replicas before returning (two-phase
+%%     commit), so there is no stale-read window between nodes.  Note the disc
+%%     write itself is asynchronous (deferred log flush) unless Mnesia is run
+%%     with {sync_log, true}; the no-stale-read guarantee comes from the
+%%     distributed lock + 2PC, not from synchronous disc writes.  Set
+%%     {mnesia, [{sync_log, true}]} in sys.config if strict crash durability
+%%     of money balances is required.
 %%
 %% A future backend (e.g. MongoDB) must satisfy the same contract via an
 %% equivalent mechanism — atomic document-level operations (findAndModify /

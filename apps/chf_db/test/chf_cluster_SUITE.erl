@@ -51,6 +51,9 @@ init_per_group(cluster, Config) ->
     %% When P1 starts, P2 is alive but has no mnesia yet, so P1 boots as
     %% single-node seed.  When P2 starts, P1 already has all tables, so P2
     %% merges P1's schema and adds a disc_copies replica per table.
+    %% MUST NOT be parallelised — P1's init/1 has to fully complete before P2
+    %% calls change_config/2, or both nodes race and seed disjoint schemas
+    %% (see the split-brain KNOWN LIMITATION note in chf_db_mnesia:init/1).
     lists:foreach(fun(P) -> setup_peer(P, Nodes) end, [P1, P2]),
     [{peers, [P1, P2]}, {peer_nodes, Nodes} | Config];
 init_per_group(_, Config) ->

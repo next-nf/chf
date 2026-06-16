@@ -60,6 +60,16 @@ init(_Opts) ->
     %% Find reachable cluster peers.  We ping here so that a node that is
     %% configured but not yet up is simply skipped (it will join later via its
     %% own init call or a Mnesia reconnect).
+    %%
+    %% KNOWN LIMITATION — split-brain on simultaneous cold start: the seed/join
+    %% decision below gates on Erlang VM reachability (net_adm:ping), not on
+    %% whether the peer's Mnesia is already running.  If every node in a fresh
+    %% cluster cold-starts at the same instant, two nodes can each see the
+    %% other's VM yet reach change_config/2 before the other's Mnesia exists,
+    %% and each then seeds its own disjoint single-node schema (permanently
+    %% diverged data).  Production boot MUST therefore be ordered: bring up one
+    %% seed node and wait for its Mnesia to be healthy before starting the
+    %% rest.  Automatic seed election / quorum is a later (Phase 2) task.
     Others = [N || N <- chf_cluster:cluster_nodes(),
                    N =/= node(),
                    pong =:= net_adm:ping(N)],
@@ -86,8 +96,17 @@ init(_Opts) ->
         [] -> ok;
         _  ->
             {ok, _MergedFrom} = mnesia:change_config(extra_db_nodes, Others),
-            _ = mnesia:change_table_copy_type(schema, node(), disc_copies),
-            ok
+            %% Make the local schema disc-resident.  On a fresh join this is a
+            %% ram→disc conversion ({atomic, ok}); on restart with a pre-existing
+            %% disc schema it is already disc_copies ({aborted, already_exists}).
+            %% Anything else (e.g. disc full, permission denied) is a real fault
+            %% that must not be swallowed — fail loudly so we never build tables
+            %% on top of an inconsistent schema.
+            case mnesia:change_table_copy_type(schema, node(), disc_copies) of
+                {atomic, ok}                                       -> ok;
+                {aborted, {already_exists, schema, _, disc_copies}} -> ok;
+                {aborted, TypeErr} -> error({schema_copy_type, TypeErr})
+            end
     end,
     ok = ensure_table(subscriber, record_info(fields, subscriber),
                       [{index, [#subscriber.msisdn]}]),
