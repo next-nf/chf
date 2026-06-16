@@ -433,11 +433,14 @@ balance_set_total(AccountId, NewTotal) ->
             end) of
                 undefined ->
                     %% Fresh account: upsert with reserved defaulting to 0.
+                    %% Wrap literals in $toLong so the persisted fields are BSON
+                    %% int64 from creation (uniform with every other write path),
+                    %% rather than int32 for small values.
                     UpsertPipeline = [
                         #{<<"$set">> => #{
-                            <<"total">>     => NewTotal,
-                            <<"reserved">>  => 0,
-                            <<"available">> => NewTotal
+                            <<"total">>     => #{<<"$toLong">> => NewTotal},
+                            <<"reserved">>  => #{<<"$toLong">> => 0},
+                            <<"available">> => #{<<"$toLong">> => NewTotal}
                         }}
                     ],
                     Cmd2 = {<<"findAndModify">>, ?BALANCES,

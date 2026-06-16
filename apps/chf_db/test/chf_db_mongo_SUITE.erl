@@ -41,6 +41,7 @@ all() ->
      balance_reserve_ok,
      balance_reserve_insufficient,
      balance_reserve_missing,
+     balance_reserve_negative,
      balance_commit_clamp,
      balance_refund_clamp,
      balance_topup_negative_rejected,
@@ -223,6 +224,16 @@ balance_reserve_insufficient(_Config) ->
 balance_reserve_missing(_Config) ->
     ?assertEqual({error, not_found},
                  chf_db_mongo:balance_reserve(<<"missing">>, 1)).
+
+%% Mirror of chf_db_balance_SUITE:reserve_negative_rejected — a negative
+%% reservation must be rejected and leave the balance untouched.
+balance_reserve_negative(_Config) ->
+    ok = seed_balance_mongo(<<"acc">>, 100, 20),
+    ?assertEqual({error, invalid_amount},
+                 chf_db_mongo:balance_reserve(<<"acc">>, -5)),
+    {ok, B} = chf_db_mongo:balance_get(<<"acc">>),
+    ?assertEqual(20, B#balance.reserved),
+    ?assertEqual(80, B#balance.available).
 
 balance_commit_clamp(_Config) ->
     ok = seed_balance_mongo(<<"acc">>, 100, 50),
