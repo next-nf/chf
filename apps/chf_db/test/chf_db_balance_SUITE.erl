@@ -36,7 +36,8 @@ all() ->
      reserve_up_to_partial,
      reserve_up_to_zero_available,
      reserve_up_to_missing_account,
-     reserve_up_to_negative_rejected].
+     reserve_up_to_negative_rejected,
+     cdr_id_is_node_tagged].
 
 init_per_testcase(_TC, Config) ->
     setup_mnesia(),
@@ -156,6 +157,12 @@ reserve_up_to_negative_rejected(_) ->
     ok = seed_balance(<<"acc">>, 100, 0),
     ?assertEqual({error, invalid_amount},
                  chf_db:balance_reserve_up_to(<<"acc">>, -5)).
+
+cdr_id_is_node_tagged(_) ->
+    Id = chf_db:cdr_generate_id(),
+    NodeBin = atom_to_binary(node(), utf8),
+    ?assertMatch({0, _}, binary:match(Id, NodeBin)),   %% node name is the prefix
+    ?assertNotEqual(Id, chf_db:cdr_generate_id()).
 
 set_total_is_absolute_and_atomic(_) ->
     ok = seed_balance(<<"acc">>, 100, 30),

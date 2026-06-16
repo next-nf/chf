@@ -136,10 +136,12 @@ cdr_write(Cdr) ->
 cdr_list(Filters) ->
     (backend()):cdr_list(Filters).
 
-%% @doc Generate a unique, monotonically-increasing CDR identifier.
+%% @doc Generate a cluster-unique, monotonically-increasing CDR identifier.
+%% Tagged with node() so IDs from different cluster nodes never collide.
 -spec cdr_generate_id() -> binary().
 cdr_generate_id() ->
-    integer_to_binary(erlang:unique_integer([positive, monotonic])).
+    iolist_to_binary([atom_to_binary(node(), utf8), $-,
+                      integer_to_binary(erlang:unique_integer([positive, monotonic]))]).
 
 %%====================================================================
 %% Session operations
