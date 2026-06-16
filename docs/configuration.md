@@ -131,14 +131,20 @@ loopback (`127.0.0.1`).
 | 8081 | HTTP (Cowboy) | `chf_web` | Web management UI; `GET /metrics` Prometheus pull endpoint | `127.0.0.1` |
 | 4318 | HTTP (outbound) | `opentelemetry_exporter` | OTLP push target for traces and metrics | `localhost` (outbound) |
 
-### 4.2 `chf_db` parameters
+### 4.2 `chf` parameters
+
+| Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `cluster_nodes` | list of atom | `[]` | list of `node()` atoms | — | Configured cluster members, including the local node. An empty list means single-node deployment; the local node is always added automatically. Charging requires a strict majority (`connected * 2 > total`) of these nodes to be reachable. See [clustering.md](clustering.md). | Determines the quorum denominator. Adding or removing entries changes how many node failures the cluster can tolerate. | 0.1.0 |
+
+### 4.3 `chf_db` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `backend` | atom | `chf_db_mnesia` | `chf_db_mnesia` | — | Selects the DB backend module. The module is resolved at startup and cached in `persistent_term`. | Determines which implementation handles all subscriber, balance, CDR, and session operations. | 0.1.0 |
 | `backend_opts` | map | `#{}` | any map | — | Opaque options passed to the backend's `init/1` callback. The Mnesia backend ignores this key; it is reserved for future backends. | Backend-specific initialisation behaviour. | 0.1.0 |
 
-### 4.3 `chf_core` parameters
+### 4.4 `chf_core` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -149,7 +155,7 @@ loopback (`127.0.0.1`).
 > `sweep_interval` is not present in the default `sys.config`; the code default
 > of 60 000 ms (1 minute) applies unless the key is added.
 
-### 4.4 `chf_core` — online-engine parameter (`default_quota`)
+### 4.5 `chf_core` — online-engine parameter (`default_quota`)
 
 This setting belongs to the online-charging engine (`chf_online.erl`) but is read
 from the **`chf_core`** application key, since `chf_online` is a module of
@@ -159,7 +165,7 @@ from the **`chf_core`** application key, since `chf_online` is a module of
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `default_quota` | integer | `10000000` | 1 – 2<sup>63</sup>−1 | micro-units | Per-RG grant ceiling used when the subscriber has no per-rating-group quota configured. | Sets the maximum units granted in a single credit-control grant when no subscriber-specific quota is configured. Reducing this value causes more frequent update cycles; increasing it reduces signalling load at the cost of larger outstanding reservations. | 0.2.0 |
 
-### 4.5 `chf_diameter` parameters
+### 4.6 `chf_diameter` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -167,6 +173,7 @@ from the **`chf_core`** application key, since `chf_online` is a module of
 | `origin_realm` | string | `"local"` | any DIAMETER realm (FQDN) | — | DIAMETER realm this node belongs to, carried in Origin-Realm AVP. | Used for realm-based routing by DIAMETER peers. | 0.1.0 |
 | `listen` | list of `{tcp, ip4_address, port}` | `[{tcp,{0,0,0,0},3868}]` | one or more listener tuples | port | Transport endpoints the DIAMETER service binds. | Determines which addresses and ports accept inbound DIAMETER connections from peers (SMF, PCEF). | 0.1.0 |
 | `validity_time` | integer | `3600` | 1 – 2<sup>31</sup>−1 | seconds | Validity-Time set on Gy CCA Multiple-Services-Credit-Control grants. | Controls how long the peer (SMF/PCEF) may use the granted units before it must send a CCR-Update. Shorter values increase signalling frequency; longer values reduce signalling at the cost of slower balance reconciliation. | 0.2.0 |
+| `cluster_unique_origin_host` | boolean | `true` | `true`, `false` | — | When `true`, prepends the node's short name (the part before `@` in the node atom) to the configured `origin_host`, ensuring each cluster node advertises a unique DiameterIdentity (RFC 6733 §3.3). For example, if `origin_host` is `"chf.epc.example.org"` and the node name is `chf1@10.0.0.1`, the effective Origin-Host becomes `"chf1.chf.epc.example.org"`. Set to `false` only when per-node `sys.config` files already supply distinct `origin_host` values. See [clustering.md](clustering.md). | Determines the Origin-Host AVP value presented to all DIAMETER peers. Changing this value requires all peers to update their peer configuration. | 0.1.0 |
 
 > [!NOTE]
 > The code-level default for `listen` is `[{tcp,{0,0,0,0},3868}]` (all
@@ -175,7 +182,7 @@ from the **`chf_core`** application key, since `chf_online` is a module of
 > experience. Operators `should` set an explicit routable address rather than
 > binding to `{0,0,0,0}` in production.
 
-### 4.6 `chf_sbi` parameters
+### 4.7 `chf_sbi` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -183,21 +190,21 @@ from the **`chf_core`** application key, since `chf_online` is a module of
 | `ip` | ip4_address (4-tuple) | `{127,0,0,1}` | any valid IPv4 address | — | IP address the Nchf SBI listener binds. | Determines which network interface accepts SBI connections. | 0.1.0 |
 | `validity_time` | integer | `3600` | 1 – 2<sup>31</sup>−1 | seconds | `validityTime` in the converged-charging `multipleUnitInformation` grants. | Controls the duration the SMF/NF consumer may use granted units before issuing an `Update` request. | 0.2.0 |
 
-### 4.7 `chf_api` parameters
+### 4.8 `chf_api` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `port` | integer | `8080` | 1–65535 | port | TCP port the provisioning REST API listener binds. | Determines the port on which operators and provisioning systems connect. | 0.1.0 |
 | `ip` | ip4_address (4-tuple) | `{127,0,0,1}` | any valid IPv4 address | — | IP address the provisioning API listener binds. | Determines which network interface accepts provisioning connections. | 0.1.0 |
 
-### 4.8 `chf_web` parameters
+### 4.9 `chf_web` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `port` | integer | `8081` | 1–65535 | port | TCP port the web UI and metrics listener binds. | Determines the port on which the management dashboard and the Prometheus scrape endpoint (`GET /metrics`) are accessible. | 0.1.0 |
 | `ip` | ip4_address (4-tuple) | `{127,0,0,1}` | any valid IPv4 address | — | IP address the web UI listener binds. | Determines which network interface accepts connections to the dashboard and metrics endpoint. | 0.1.0 |
 
-### 4.9 `opentelemetry` parameters
+### 4.10 `opentelemetry` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -205,14 +212,14 @@ from the **`chf_core`** application key, since `chf_online` is a module of
 | `traces_exporter` | atom | `none` | `none`, `otlp` | — | Exporter for distributed traces. `none` disables trace export; `otlp` exports via the endpoint configured in `opentelemetry_exporter`. | When `none`, no trace data is sent to the collector; spans are still created and can be inspected in-process. | 0.1.0 |
 | `resource` | map | `#{service => #{name => <<"chf">>}}` | an OTel resource map | — | Resource attributes attached to every span and metric. The `service.name` attribute identifies this node in a collector or UI. | All exported telemetry carries these attributes; changing `service.name` affects how the data appears in Jaeger, Grafana, and similar tools. | 0.1.0 |
 
-### 4.10 `opentelemetry_exporter` parameters
+### 4.11 `opentelemetry_exporter` parameters
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `otlp_protocol` | atom | `http_protobuf` | `http_protobuf`, `grpc` | — | Wire protocol used to push telemetry to the OTLP collector. | Determines the serialisation format and transport used for export. | 0.1.0 |
 | `otlp_endpoint` | string | `"http://localhost:4318"` | any HTTP or HTTPS URL | — | Base URL of the OTLP collector to which traces and metrics are pushed. The exporter appends `/v1/traces` or `/v1/metrics` as appropriate. | All OTLP push export goes to this address. Change this to point at a local collector sidecar (e.g. OpenTelemetry Collector) or a hosted endpoint (e.g. Grafana Cloud). | 0.1.0 |
 
-### 4.11 `opentelemetry_experimental` metric readers
+### 4.12 `opentelemetry_experimental` metric readers
 
 Two metric readers are configured. Both are specified under the `readers` key:
 

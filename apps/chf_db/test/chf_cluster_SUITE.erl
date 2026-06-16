@@ -93,8 +93,8 @@ end_per_group(cluster, Config) ->
     ok;
 end_per_group(cluster3, Config) ->
     lists:foreach(fun({P, _N}) ->
-        %% disconnect_node in the test leaves peers alive but isolated; wrap in
-        %% catch because a reconnect race may have already stopped one.
+        %% Wrap peer:stop/1 in catch: a peer may already be stopped (e.g. by a
+        %% takeover test), so stopping it again throws — ignore that.
         catch peer:stop(P)
     end, ?config(peers3, Config)),
     ok;
