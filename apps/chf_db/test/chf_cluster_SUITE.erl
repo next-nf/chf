@@ -22,10 +22,15 @@
 -include_lib("common_test/include/ct.hrl").
 
 all() ->
-    [configured_nodes_includes_self, connected_is_self_when_alone].
+    [configured_nodes_includes_self, configured_nodes_empty_is_self,
+     connected_is_self_when_alone].
 
 configured_nodes_includes_self(_) ->
     application:set_env(chf, cluster_nodes, [node()]),
+    ?assertEqual([node()], chf_cluster:cluster_nodes()).
+
+configured_nodes_empty_is_self(_) ->
+    application:set_env(chf, cluster_nodes, []),
     ?assertEqual([node()], chf_cluster:cluster_nodes()).
 
 connected_is_self_when_alone(_) ->

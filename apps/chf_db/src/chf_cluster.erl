@@ -55,6 +55,7 @@ connected_nodes() ->
 %% gen_server lifecycle
 %%====================================================================
 
+-spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 

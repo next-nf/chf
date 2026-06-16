@@ -31,9 +31,11 @@ init([]) ->
         period    => 10
     },
     Children = [
-        #{id      => chf_cluster,
-          start   => {chf_cluster, start_link, []},
-          restart => permanent,
-          type    => worker}
+        #{id       => chf_cluster,
+          start    => {chf_cluster, start_link, []},
+          restart  => permanent,
+          shutdown => 5000,
+          type     => worker,
+          modules  => [chf_cluster]}
     ],
     {ok, {SupFlags, Children}}.
