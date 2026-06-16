@@ -18,7 +18,7 @@
 {application, chf_db, [
     {vsn, semver},
     {description, "Next-CHF Database Layer"},
-    {applications, [kernel, stdlib]},
+    {applications, [kernel, stdlib, mongodb]},
     {mod, {chf_db_app, []}},
     {registered, []}
 ]}.
