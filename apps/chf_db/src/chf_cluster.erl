@@ -15,11 +15,13 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_cluster.erl — Static-list cluster membership + node monitoring (Phase 1).
+%% chf_cluster.erl — Static-list cluster membership + node monitoring (Phase 2).
 %%
 %% Reads the configured peer node list from {chf, cluster_nodes}, connects to
-%% all peers at startup, and monitors node up/down events.  Quorum logic is
-%% NOT here — that is Phase 2.
+%% all peers at startup, and monitors node up/down events.  Quorum (strict
+%% majority) is computed on init and after every nodeup/nodedown event; the
+%% result is cached in persistent_term so the charging path can read it without
+%% a gen_server call.
 %%
 %% Configuration (sys.config):
 %%   {chf, [{cluster_nodes, []}]}   %% empty = single-node; add peer atoms for clustering
@@ -31,8 +33,10 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/0, cluster_nodes/0, connected_nodes/0]).
+-export([start_link/0, cluster_nodes/0, connected_nodes/0, in_quorum/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+
+-define(QUORUM_PT, {chf_cluster, in_quorum}).
 
 %%====================================================================
 %% Public API
@@ -51,6 +55,22 @@ connected_nodes() ->
     Others = [N || N <- cluster_nodes(), N =/= node(), lists:member(N, nodes())],
     lists:usort([node() | Others]).
 
+%% @doc Return true if this node can see a strict majority of configured nodes.
+%%      Defaults to true so that a single-node or unconfigured deployment
+%%      charges normally before the first refresh.
+-spec in_quorum() -> boolean().
+in_quorum() ->
+    persistent_term:get(?QUORUM_PT, true).
+
+%% @doc Recompute quorum and cache it in persistent_term.
+-spec refresh_quorum() -> boolean().
+refresh_quorum() ->
+    Total     = length(cluster_nodes()),
+    Connected = length(connected_nodes()),
+    InQuorum  = Connected * 2 > Total,   %% strict majority
+    persistent_term:put(?QUORUM_PT, InQuorum),
+    InQuorum.
+
 %%====================================================================
 %% gen_server lifecycle
 %%====================================================================
@@ -68,6 +88,7 @@ init([]) ->
         end,
     _ = [net_kernel:connect_node(N) || N <- cluster_nodes(), N =/= node()],
     ?LOG_INFO("chf_cluster: configured nodes ~p", [cluster_nodes()]),
+    refresh_quorum(),
     {ok, #{}}.
 
 handle_call(_Request, _From, State) ->
@@ -78,9 +99,11 @@ handle_cast(_Msg, State) ->
 
 handle_info({nodeup, N}, State) ->
     ?LOG_INFO("chf_cluster: nodeup ~p (connected: ~p)", [N, connected_nodes()]),
+    refresh_quorum(),
     {noreply, State};
 handle_info({nodedown, N}, State) ->
     ?LOG_WARNING("chf_cluster: nodedown ~p (connected: ~p)", [N, connected_nodes()]),
+    refresh_quorum(),
     {noreply, State};
 handle_info(_Msg, State) ->
     {noreply, State}.

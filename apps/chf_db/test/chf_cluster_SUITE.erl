@@ -25,6 +25,7 @@
 all() ->
     [configured_nodes_includes_self, configured_nodes_empty_is_self,
      connected_is_self_when_alone,
+     quorum_alone_is_true, quorum_minority_is_false,
      {group, cluster}].
 
 groups() ->
@@ -208,4 +209,16 @@ connected_is_self_when_alone(_) ->
     application:set_env(chf, cluster_nodes, [node()]),
     {ok, _} = chf_cluster:start_link(),
     ?assertEqual([node()], lists:sort(chf_cluster:connected_nodes())),
+    gen_server:stop(chf_cluster).
+
+quorum_alone_is_true(_) ->
+    application:set_env(chf, cluster_nodes, [node()]),
+    {ok, _} = chf_cluster:start_link(),
+    ?assert(chf_cluster:in_quorum()),
+    gen_server:stop(chf_cluster).
+
+quorum_minority_is_false(_) ->
+    application:set_env(chf, cluster_nodes, [node(), 'a@nohost', 'b@nohost']),
+    {ok, _} = chf_cluster:start_link(),
+    ?assertNot(chf_cluster:in_quorum()),   %% sees only self (1 of 3)
     gen_server:stop(chf_cluster).
