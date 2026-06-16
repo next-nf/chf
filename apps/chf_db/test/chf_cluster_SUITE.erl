@@ -15,25 +15,21 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
--module(chf_db_sup).
--behaviour(supervisor).
+-module(chf_cluster_SUITE).
+-compile(export_all).
 
--export([start_link/0]).
--export([init/1]).
+-include_lib("eunit/include/eunit.hrl").
+-include_lib("common_test/include/ct.hrl").
 
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+all() ->
+    [configured_nodes_includes_self, connected_is_self_when_alone].
 
-init([]) ->
-    SupFlags = #{
-        strategy  => one_for_one,
-        intensity => 5,
-        period    => 10
-    },
-    Children = [
-        #{id      => chf_cluster,
-          start   => {chf_cluster, start_link, []},
-          restart => permanent,
-          type    => worker}
-    ],
-    {ok, {SupFlags, Children}}.
+configured_nodes_includes_self(_) ->
+    application:set_env(chf, cluster_nodes, [node()]),
+    ?assertEqual([node()], chf_cluster:cluster_nodes()).
+
+connected_is_self_when_alone(_) ->
+    application:set_env(chf, cluster_nodes, [node()]),
+    {ok, _} = chf_cluster:start_link(),
+    ?assertEqual([node()], lists:sort(chf_cluster:connected_nodes())),
+    gen_server:stop(chf_cluster).
