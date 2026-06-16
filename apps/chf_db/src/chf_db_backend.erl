@@ -45,6 +45,30 @@
 
 %% ------------------------------------------------------------------
 %% Balance operations (all amounts in micro-units)
+%%
+%% Atomicity and serialization contract
+%% ------------------------------------
+%% The callbacks balance_reserve, balance_reserve_up_to, balance_commit, and
+%% balance_refund, together with session_transaction, MUST be atomic and
+%% serialized per-subscriber under concurrent multi-node access.  Concurrent
+%% calls for the same AccountId or SessionId must never interleave in a way
+%% that violates the balance invariant (available = total - reserved) or
+%% produces double-spending.
+%%
+%% The Mnesia backend (chf_db_mnesia) satisfies this contract via:
+%%   - Distributed Mnesia transactions:  each balance/session operation runs
+%%     inside mnesia:activity(transaction, …) which acquires a distributed
+%%     write lock on the record before reading it.  Mnesia serializes
+%%     conflicting transactions cluster-wide, so no two nodes can commit
+%%     overlapping changes to the same record simultaneously.
+%%   - disc_copies replicas on every cluster node:  every committed
+%%     transaction is synchronously written to all replicas before returning,
+%%     so there is no stale-read window between nodes.
+%%
+%% A future backend (e.g. MongoDB) must satisfy the same contract via an
+%% equivalent mechanism — atomic document-level operations (findAndModify /
+%% update with $inc + optimistic-concurrency retry) or multi-document
+%% transactions with appropriate write concern.
 %% ------------------------------------------------------------------
 
 %% Retrieve the current balance for an account.
@@ -54,16 +78,20 @@
 -callback balance_topup(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
 %% Reserve Amount: available must be >= Amount; decrement available, increment reserved.
+%% MUST be atomic and serialized per AccountId (see contract above).
 -callback balance_reserve(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
 %% Reserve up to Amount: grants min(Amount, available); never fails due to insufficient balance.
+%% MUST be atomic and serialized per AccountId (see contract above).
 -callback balance_reserve_up_to(AccountId :: binary(), Amount :: integer()) ->
     {ok, Granted :: non_neg_integer(), Balance :: term()} | {error, term()}.
 
 %% Commit actual spend of Amount against reserved funds; decrement reserved.
+%% MUST be atomic and serialized per AccountId (see contract above).
 -callback balance_commit(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
 %% Return Amount from reserved back to available (e.g. over-estimated grant).
+%% MUST be atomic and serialized per AccountId (see contract above).
 -callback balance_refund(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
 %% Set the absolute total balance; available is re-derived as total - reserved.
@@ -101,4 +129,5 @@
 %%   {commit, NewSession, Result} — write NewSession, return Result
 %%   {result, Result}             — write nothing, return Result
 %%   {abort, Reason}              — roll back, return {error, Reason}
+%% MUST be atomic and serialized per SessionId (see balance contract above).
 -callback session_transaction(SessionId :: binary(), Fun :: fun()) -> term() | {error, term()}.
