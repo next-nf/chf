@@ -24,7 +24,7 @@
 
 -include_lib("chf_db/include/chf_db.hrl").
 
--export([initial_request/2, update_request/2, terminate_request/2]).
+-export([initial_request/3, update_request/3, terminate_request/3]).
 
 %%====================================================================
 %% API
@@ -37,14 +37,14 @@
 %%
 %% Returns {ok, #{RatingGroup => #{granted => integer(), outcome => atom()}}}
 %% or {error, Reason}.
--spec initial_request(Imsi :: binary(), RatingGroups :: [map()]) ->
+-spec initial_request(Ctx :: term(), Imsi :: binary(), RatingGroups :: [map()]) ->
     {ok, #{non_neg_integer() => #{granted => non_neg_integer(),
                                   outcome => granted | final_grant | credit_limit_reached}}} |
     {error, term()}.
-initial_request(Imsi, RatingGroups) ->
+initial_request(Ctx, Imsi, RatingGroups) ->
     case lookup_active_subscriber(Imsi) of
         {ok, Sub} ->
-            grant_units(Sub, RatingGroups, #{});
+            grant_units(Ctx, Sub, RatingGroups, #{});
         {error, _} = Err ->
             Err
     end.
@@ -54,18 +54,18 @@ initial_request(Imsi, RatingGroups) ->
 %% RatingGroups :: [#{rating_group  => non_neg_integer(),
 %%                    used_units    => integer(),
 %%                    requested_units => integer()}]
--spec update_request(Imsi :: binary(), RatingGroups :: [map()]) ->
+-spec update_request(Ctx :: term(), Imsi :: binary(), RatingGroups :: [map()]) ->
     {ok, #{non_neg_integer() => #{granted => non_neg_integer(),
                                   outcome => granted | final_grant | credit_limit_reached}}} |
     {error, term()}.
-update_request(Imsi, RatingGroups) ->
+update_request(Ctx, Imsi, RatingGroups) ->
     case lookup_active_subscriber(Imsi) of
         {ok, Sub} ->
             AccountId = Sub#subscriber.account_id,
             %% First commit all used units, then re-grant.
-            case commit_used(AccountId, RatingGroups) of
+            case commit_used(Ctx, AccountId, RatingGroups) of
                 ok ->
-                    grant_units(Sub, RatingGroups, #{});
+                    grant_units(Ctx, Sub, RatingGroups, #{});
                 {error, _} = Err ->
                     Err
             end;
@@ -78,9 +78,9 @@ update_request(Imsi, RatingGroups) ->
 %% RatingGroups :: [#{rating_group   => non_neg_integer(),
 %%                    used_units     => integer(),   %% final delta usage
 %%                    reserved_units => integer()}]   %% outstanding reservation
--spec terminate_request(Imsi :: binary(), RatingGroups :: [map()]) ->
+-spec terminate_request(Ctx :: term(), Imsi :: binary(), RatingGroups :: [map()]) ->
     ok | {error, term()}.
-terminate_request(Imsi, RatingGroups) ->
+terminate_request(Ctx, Imsi, RatingGroups) ->
     case chf_db:subscriber_lookup(Imsi) of
         {ok, Sub} ->
             AccountId = Sub#subscriber.account_id,
@@ -94,11 +94,11 @@ terminate_request(Imsi, RatingGroups) ->
                 Reserved = maps:get(reserved_units, RG, 0),
                 Refund   = max(0, Reserved - Used),
                 ErrAcc1 = if Used > 0 ->
-                                 record_balance_op(commit, AccountId, Used, ErrAcc0);
+                                 record_balance_op(commit, Ctx, AccountId, Used, ErrAcc0);
                              true -> ErrAcc0
                           end,
                 if Refund > 0 ->
-                       record_balance_op(refund, AccountId, Refund, ErrAcc1);
+                       record_balance_op(refund, Ctx, AccountId, Refund, ErrAcc1);
                    true -> ErrAcc1
                 end
             end, [], RatingGroups),
@@ -112,11 +112,11 @@ terminate_request(Imsi, RatingGroups) ->
 
 %% Apply one terminate-time balance op (commit|refund), record the real OTEL
 %% outcome, and prepend {Op, Reason} to the error accumulator on failure.
--spec record_balance_op(commit | refund, binary(), integer(), [term()]) -> [term()].
-record_balance_op(commit, AccountId, Amount, ErrAcc) ->
-    classify(commit, chf_db:balance_commit(AccountId, Amount), ErrAcc);
-record_balance_op(refund, AccountId, Amount, ErrAcc) ->
-    classify(refund, chf_db:balance_refund(AccountId, Amount), ErrAcc).
+-spec record_balance_op(commit | refund, term(), binary(), integer(), [term()]) -> [term()].
+record_balance_op(commit, Ctx, AccountId, Amount, ErrAcc) ->
+    classify(commit, chf_db:balance_commit(Ctx, AccountId, Amount), ErrAcc);
+record_balance_op(refund, Ctx, AccountId, Amount, ErrAcc) ->
+    classify(refund, chf_db:balance_refund(Ctx, AccountId, Amount), ErrAcc).
 
 classify(Op, {ok, _}, ErrAcc) ->
     chf_otel:record_balance_op(Op, ok),
@@ -146,27 +146,27 @@ lookup_active_subscriber(Imsi) ->
 
 %% Reserve quota for each RatingGroup, accumulating per-RG outcome maps.
 %% Never returns {error, _}: balance exhaustion / a missing balance record is
-%% absorbed into the credit_limit_reached outcome (see reserve_rg/2).
--spec grant_units(#subscriber{}, [map()],
+%% absorbed into the credit_limit_reached outcome (see reserve_rg/3).
+-spec grant_units(term(), #subscriber{}, [map()],
                   #{non_neg_integer() => #{granted => non_neg_integer(),
                                            outcome => granted | final_grant | credit_limit_reached}}) ->
     {ok, #{non_neg_integer() => #{granted => non_neg_integer(),
                                   outcome => granted | final_grant | credit_limit_reached}}}.
-grant_units(_Sub, [], Acc) ->
+grant_units(_Ctx, _Sub, [], Acc) ->
     {ok, Acc};
-grant_units(Sub, [RG | Rest], Acc) ->
+grant_units(Ctx, Sub, [RG | Rest], Acc) ->
     AccountId = Sub#subscriber.account_id,
     RGId      = maps:get(rating_group, RG),
     Requested = maps:get(requested_units, RG, 0),
     Desired   = min(Requested, rg_quota(Sub, RGId)),
-    {Granted, Outcome} = reserve_rg(AccountId, Desired),
-    grant_units(Sub, Rest, Acc#{RGId => #{granted => Granted, outcome => Outcome}}).
+    {Granted, Outcome} = reserve_rg(Ctx, AccountId, Desired),
+    grant_units(Ctx, Sub, Rest, Acc#{RGId => #{granted => Granted, outcome => Outcome}}).
 
--spec reserve_rg(binary(), non_neg_integer()) ->
+-spec reserve_rg(term(), binary(), non_neg_integer()) ->
     {non_neg_integer(), granted | final_grant | credit_limit_reached}.
-reserve_rg(_AccountId, 0) -> {0, granted};
-reserve_rg(AccountId, Desired) ->
-    case chf_db:balance_reserve_up_to(AccountId, Desired) of
+reserve_rg(_Ctx, _AccountId, 0) -> {0, granted};
+reserve_rg(Ctx, AccountId, Desired) ->
+    case chf_db:balance_reserve_up_to(Ctx, AccountId, Desired) of
         {ok, Desired, _}                         -> chf_otel:record_balance_op(reserve, ok),
                                                     {Desired, granted};
         {ok, 0, _}                               -> chf_otel:record_balance_op(reserve, credit_limit_reached),
@@ -178,15 +178,15 @@ reserve_rg(AccountId, Desired) ->
     end.
 
 %% Commit used units for each RatingGroup.
--spec commit_used(binary(), [map()]) -> ok | {error, term()}.
-commit_used(_AccountId, []) ->
+-spec commit_used(term(), binary(), [map()]) -> ok | {error, term()}.
+commit_used(_Ctx, _AccountId, []) ->
     ok;
-commit_used(AccountId, [RG | Rest]) ->
+commit_used(Ctx, AccountId, [RG | Rest]) ->
     Used = maps:get(used_units, RG, 0),
-    case chf_db:balance_commit(AccountId, Used) of
+    case chf_db:balance_commit(Ctx, AccountId, Used) of
         {ok, _} ->
             chf_otel:record_balance_op(commit, ok),
-            commit_used(AccountId, Rest);
+            commit_used(Ctx, AccountId, Rest);
         {error, Reason} ->
             chf_otel:record_balance_op(commit, Reason),
             {error, Reason}
