@@ -85,7 +85,7 @@ origin_host_is_node_unique(_) ->
     application:set_env(chf_diameter, origin_host, "chf.epc.example.org"),
     H = chf_diameter_srv:effective_origin_host(),
     [Short | _] = string:split(atom_to_list(node()), "@"),
-    ?assert(string:str(H, Short) > 0).
+    ?assert(string:find(H, Short) =/= nomatch).
 
 %%--- helpers ---------------------------------------------------------
 

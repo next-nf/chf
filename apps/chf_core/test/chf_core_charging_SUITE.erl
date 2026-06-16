@@ -34,7 +34,8 @@ all() ->
      sweeper_survives_stray_message,
      partial_grant_marks_final,
      zero_available_credit_limit_reached,
-     multi_rg_drain_leaves_trailing_credit_limited].
+     multi_rg_drain_leaves_trailing_credit_limited,
+     sweeper_registers_globally].
 
 init_per_testcase(_TC, Config) -> setup_mnesia(), Config.
 end_per_testcase(_TC, _Config) -> mnesia:stop(), ok.
@@ -209,4 +210,11 @@ sweeper_survives_stray_message(_) ->
     timer:sleep(400),
     {ok, S} = chf_db:session_lookup(<<"s">>),
     ?assertEqual(terminated, S#charging_session.state),
+    gen_server:stop(Pid).
+
+sweeper_registers_globally(_) ->
+    %% Ensure no leftover global registration from other tests.
+    global:unregister_name(chf_session_sweeper),
+    {ok, Pid} = chf_session_sweeper:start_link(),
+    ?assertEqual(Pid, global:whereis_name(chf_session_sweeper)),
     gen_server:stop(Pid).
