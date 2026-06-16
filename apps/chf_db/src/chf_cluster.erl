@@ -33,7 +33,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/0, cluster_nodes/0, connected_nodes/0, in_quorum/0]).
+-export([start_link/0, cluster_nodes/0, connected_nodes/0, in_quorum/0, refresh_quorum/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(QUORUM_PT, {chf_cluster, in_quorum}).
