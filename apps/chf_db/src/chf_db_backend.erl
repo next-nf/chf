@@ -146,9 +146,14 @@
 -callback session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
 
 %% Run Fun against the current session record (or undefined) inside a single
-%% backend transaction holding a write lock on the session id. Fun returns:
+%% backend transaction holding a write lock on the session id. Fun is called as
+%% Fun(Ctx, Session) where Ctx is a backend-specific context token (atom 'mnesia'
+%% for the Mnesia backend) and Session is the current #charging_session{} or
+%% undefined. Fun returns:
 %%   {commit, NewSession, Result} — write NewSession, return Result
 %%   {result, Result}             — write nothing, return Result
 %%   {abort, Reason}              — roll back, return {error, Reason}
 %% MUST be atomic and serialized per SessionId (see balance contract above).
--callback session_transaction(SessionId :: binary(), Fun :: fun()) -> term() | {error, term()}.
+-callback session_transaction(SessionId :: binary(),
+                              Fun :: fun((Ctx :: term(), Session :: term()) -> term())) ->
+    term() | {error, term()}.

@@ -54,22 +54,22 @@ mk_session(Id) ->
 txn_commit_persists(_) ->
     S = mk_session(<<"s1">>),
     Res = chf_db:session_transaction(<<"s1">>,
-            fun(undefined) -> {commit, S, created} end),
+            fun(_Ctx, undefined) -> {commit, S, created} end),
     ?assertEqual(created, Res),
     ?assertMatch({ok, #charging_session{session_id = <<"s1">>}},
                  chf_db:session_lookup(<<"s1">>)).
 
 txn_abort_does_not_persist(_) ->
     Res = chf_db:session_transaction(<<"s2">>,
-            fun(undefined) -> {abort, nope} end),
+            fun(_Ctx, undefined) -> {abort, nope} end),
     ?assertEqual({error, nope}, Res),
     ?assertEqual({error, not_found}, chf_db:session_lookup(<<"s2">>)).
 
 txn_sees_current_record(_) ->
     ok = chf_db:session_store(mk_session(<<"s3">>)),
     Res = chf_db:session_transaction(<<"s3">>,
-            fun(#charging_session{state = active}) -> {result, was_active};
-               (_) -> {result, other}
+            fun(_Ctx, #charging_session{state = active}) -> {result, was_active};
+               (_Ctx, _) -> {result, other}
             end),
     ?assertEqual(was_active, Res).
 

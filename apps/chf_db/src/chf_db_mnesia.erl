@@ -461,7 +461,7 @@ session_transaction(SessionId, Fun) ->
             [#charging_session{} = S] -> S;
             []                        -> undefined
         end,
-        case Fun(Current) of
+        case Fun(mnesia, Current) of
             {commit, #charging_session{} = New, Result} ->
                 ok = mnesia:write(New),
                 Result;

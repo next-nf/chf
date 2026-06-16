@@ -53,11 +53,11 @@ create_session(#{session_id := SessionId, imsi := Imsi, type := Type}) ->
         updated_at    = Now
     },
     chf_db:session_transaction(SessionId, fun
-        (undefined) ->
+        (_Ctx, undefined) ->
             {commit, New, {ok, SessionId}};
-        (#charging_session{state = terminated}) ->
+        (_Ctx, #charging_session{state = terminated}) ->
             {commit, New, {ok, SessionId}};
-        (#charging_session{state = active}) ->
+        (_Ctx, #charging_session{state = active}) ->
             {abort, session_exists}
     end).
 
@@ -66,9 +66,9 @@ create_session(#{session_id := SessionId, imsi := Imsi, type := Type}) ->
 session_initial(SessionId, RequestData) ->
     with_quorum(fun() ->
         chf_db:session_transaction(SessionId, fun
-            (#charging_session{state = active} = S) -> do_initial(S, RequestData);
-            (#charging_session{state = terminated}) -> {abort, session_terminated};
-            (undefined)                             -> {abort, not_found}
+            (_Ctx, #charging_session{state = active} = S) -> do_initial(S, RequestData);
+            (_Ctx, #charging_session{state = terminated}) -> {abort, session_terminated};
+            (_Ctx, undefined)                             -> {abort, not_found}
         end)
     end).
 
@@ -77,9 +77,9 @@ session_initial(SessionId, RequestData) ->
 session_update(SessionId, RequestData) ->
     with_quorum(fun() ->
         chf_db:session_transaction(SessionId, fun
-            (#charging_session{state = active} = S) -> do_update(S, RequestData);
-            (#charging_session{state = terminated}) -> {abort, session_terminated};
-            (undefined)                             -> {abort, not_found}
+            (_Ctx, #charging_session{state = active} = S) -> do_update(S, RequestData);
+            (_Ctx, #charging_session{state = terminated}) -> {abort, session_terminated};
+            (_Ctx, undefined)                             -> {abort, not_found}
         end)
     end).
 
@@ -88,9 +88,9 @@ session_update(SessionId, RequestData) ->
 session_terminate(SessionId, RequestData) ->
     with_quorum(fun() ->
         chf_db:session_transaction(SessionId, fun
-            (#charging_session{state = active} = S) -> do_terminate(S, RequestData);
-            (#charging_session{state = terminated}) -> {result, ok};
-            (undefined)                             -> {abort, not_found}
+            (_Ctx, #charging_session{state = active} = S) -> do_terminate(S, RequestData);
+            (_Ctx, #charging_session{state = terminated}) -> {result, ok};
+            (_Ctx, undefined)                             -> {abort, not_found}
         end)
     end).
 
@@ -103,14 +103,14 @@ session_terminate_if_stale(SessionId, MaxAge) ->
     with_quorum(fun() ->
         Now = now_ms(),
         chf_db:session_transaction(SessionId, fun
-            (#charging_session{state = active, updated_at = U} = S)
+            (_Ctx, #charging_session{state = active, updated_at = U} = S)
               when (Now - U) > MaxAge ->
                 do_terminate(S, #{rating_groups => []});
-            (#charging_session{state = active}) ->
+            (_Ctx, #charging_session{state = active}) ->
                 {result, skipped};
-            (#charging_session{state = terminated}) ->
+            (_Ctx, #charging_session{state = terminated}) ->
                 {result, ok};
-            (undefined) ->
+            (_Ctx, undefined) ->
                 {result, {error, not_found}}
         end)
     end).
