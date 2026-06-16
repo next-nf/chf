@@ -184,9 +184,10 @@ Multi-node cluster tests live in
 - `cluster3` group: 3-node test confirming that a node placed in a minority
   partition refuses charging while the majority continues.
 
-The cluster groups are excluded from the default `rebar3 ct` path (they require
-peer node setup and longer runtimes). Run them explicitly when validating
-cluster logic:
+The cluster groups run as part of `rebar3 ct` (they are listed in the suite's
+`all/0`). They start extra BEAM nodes via the `peer` module, so they require
+Erlang distribution and take longer than the single-node suites; run them in
+isolation when iterating on cluster logic:
 
 ```sh
 rebar3 ct --suite apps/chf_db/test/chf_cluster_SUITE --group cluster
