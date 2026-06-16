@@ -22,23 +22,29 @@
 %% delivered in subsequent tasks.
 %%
 %% NOTE: -behaviour(chf_db_backend) is intentionally NOT declared here.
-%% Adding it now would trigger "behaviour callback missing" warnings for the 23
-%% unimplemented callbacks, which would fail the build under warnings_as_errors.
-%% The attribute will be added in the task that delivers the final callback
-%% (once all 23 stubs + the two implemented here are complete).
+%% chf_db_backend declares 23 callbacks; this skeleton implements only init/1.
+%% Declaring the behaviour now would emit "callback missing" warnings for the
+%% other 22, which fails the build under warnings_as_errors. The attribute is
+%% added in the task that delivers the final callback (once all 23 exist).
 %%
 %% Supervision note: mongoc:connect/3 uses mc_topology:start_link internally,
 %% which links the topology gen_server to the calling process. If the caller
 %% exits, the topology dies too. To prevent this, init/1 spawns a dedicated
-%% keeper process (chf_db_mongo_keeper) that owns the link. The keeper is a
-%% simple receive-loop process registered under {chf_db_mongo, keeper}. It
-%% traps exits so that a topology crash does not kill the keeper; instead the
-%% keeper can report or restart.
+%% keeper process (registered as chf_db_mongo_keeper) that owns the link. The
+%% keeper traps exits so a topology crash does not kill it.
 %%
-%% In production the keeper is started by chf_db_mongo:init/1 which is called
-%% from chf_db_app:start/2 (the application master process, which is long-lived).
-%% The keeper process then becomes the parent of the topology. Both survive for
-%% the life of the chf_db application.
+%% LIMITATION (skeleton phase): the keeper is NOT yet under chf_db_sup, so it is
+%% not restarted if it crashes, and a topology crash leaves a stale Pid in
+%% persistent_term. The next task moves the keeper to a supervised gen_server
+%% child of chf_db_sup so the supervisor owns the link and can heal the
+%% connection (disconnect + reconnect) on restart. For the current ops-free
+%% skeleton this is adequate: init/1 runs once at app/CT start in a clean node.
+%% To bound the latent leak, init/1 tears down any pre-existing keeper before
+%% spawning a fresh one (see do_connect/4), so repeated init/1 calls do not
+%% accumulate orphan keepers.
+%%
+%% In production the keeper is started by chf_db_mongo:init/1, called from
+%% chf_db_app:start/2 (the long-lived application master process).
 -module(chf_db_mongo).
 
 -include_lib("chf_db/include/chf_db.hrl").
@@ -47,9 +53,6 @@
     init/1,
     topology/0
 ]).
-
-%% internal export — keeper loop (called via spawn, not direct)
--export([keeper_loop/0]).
 
 %%====================================================================
 %% Public API
@@ -96,33 +99,19 @@ topology() ->
 %% Internal: keeper process
 %%====================================================================
 
-%% keeper_loop/0 — A long-lived process that owns the link to the mc_topology
-%% gen_server. By trapping exits the keeper survives individual topology crashes
-%% (they will be restarted by a future supervisor integration). The keeper is
-%% spawned once per node and stays alive for the lifetime of the chf_db app.
-keeper_loop() ->
-    process_flag(trap_exit, true),
-    receive
-        {'EXIT', _Pid, _Reason} ->
-            %% Topology died. Stay alive; a future restart mechanism or
-            %% application stop will handle cleanup.
-            keeper_loop();
-        stop ->
-            ok;
-        _ ->
-            keeper_loop()
-    end.
-
-%% do_connect/4 — Spawn keeper, connect from keeper context, store topology.
+%% do_connect/4 — Tear down any prior keeper, spawn a fresh keeper, connect from
+%% the keeper's context (so mc_topology:start_link's link is owned by the keeper,
+%% not by the short-lived init/1 caller), then store the topology.
 -spec do_connect(binary(), string(), pos_integer(), binary()) -> ok | {error, term()}.
 do_connect(ReplSet, HostStr, PoolSize, Database) ->
-    %% Spawn the keeper process so that mc_topology:start_link's link is owned
-    %% by the keeper, not by the init/1 caller (which may be short-lived in CT).
+    %% Kill any pre-existing keeper so re-init does not leak orphan keepers.
+    %% The keeper owns the link to the old topology, so killing it also brings
+    %% the old topology down, freeing the chf_db_mongo_pool name for re-use.
+    stop_keeper(),
     Caller = self(),
     Keeper = spawn(fun() ->
-        %% Register so we can find it on re-init
-        catch register(chf_db_mongo_keeper, self()),
         process_flag(trap_exit, true),
+        catch register(chf_db_mongo_keeper, self()),
         ConnResult = mongoc:connect(
             {rs, ReplSet, [HostStr]},
             [{name, chf_db_mongo_pool}, {register, chf_db_mongo_pool}, {pool_size, PoolSize}],
@@ -134,13 +123,56 @@ do_connect(ReplSet, HostStr, PoolSize, Database) ->
     receive
         {connect_result, Keeper, {ok, Topology}} ->
             persistent_term:put({chf_db_mongo, topology}, Topology),
-            ensure_indexes(Topology);
+            case ensure_indexes(Topology) of
+                ok ->
+                    ok;
+                {error, _} = Err ->
+                    %% Index setup failed — do not leave the keeper/topology
+                    %% dangling when the app start is going to fail.
+                    persistent_term:erase({chf_db_mongo, topology}),
+                    stop_keeper(),
+                    Err
+            end;
         {connect_result, Keeper, {error, Reason}} ->
-            exit(Keeper, shutdown),
+            stop_keeper(Keeper),
             {error, Reason}
     after 30000 ->
-        exit(Keeper, shutdown),
+        stop_keeper(Keeper),
         {error, connect_timeout}
+    end.
+
+%% keeper_loop/0 — Long-lived process that owns the link to the mc_topology
+%% gen_server. Trapping exits means a topology crash does not kill the keeper.
+keeper_loop() ->
+    receive
+        {'EXIT', _Pid, _Reason} ->
+            %% Topology died; stay alive (see module-level LIMITATION note).
+            keeper_loop();
+        stop ->
+            ok;
+        _ ->
+            keeper_loop()
+    end.
+
+%% stop_keeper/0 — Synchronously tear down the registered keeper (if any),
+%% waiting for it to actually exit so its registered names are released before
+%% the caller re-registers them.
+-spec stop_keeper() -> ok.
+stop_keeper() ->
+    case whereis(chf_db_mongo_keeper) of
+        undefined -> ok;
+        Pid       -> stop_keeper(Pid)
+    end.
+
+-spec stop_keeper(pid()) -> ok.
+stop_keeper(Pid) when is_pid(Pid) ->
+    Ref = monitor(process, Pid),
+    exit(Pid, shutdown),
+    receive
+        {'DOWN', Ref, process, Pid, _} -> ok
+    after 5000 ->
+        demonitor(Ref, [flush]),
+        ok
     end.
 
 %%====================================================================
