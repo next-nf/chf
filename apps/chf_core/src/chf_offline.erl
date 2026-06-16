@@ -34,8 +34,7 @@
 %% For offline charging the initial request simply records that the
 %% session has started.  A CDR with zero usage is written per
 %% RatingGroup so that downstream mediation can correlate records.
--spec initial_request(Ctx :: term(), Imsi :: binary(), SessionId :: binary()) ->
-    ok | {error, term()}.
+-spec initial_request(Ctx :: term(), Imsi :: binary(), SessionId :: binary()) -> ok.
 initial_request(Ctx, Imsi, SessionId) ->
     %% Write a single "session-open" CDR with no usage details.
     Cdr = #cdr{
@@ -55,7 +54,9 @@ initial_request(Ctx, Imsi, SessionId) ->
 %% Data :: #{session_id => binary(),
 %%           rating_groups => [#{rating_group  => non_neg_integer(),
 %%                               used_units    => integer()}]}
--spec update_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok | {error, term()}.
+%% Returns ok; inside a session_transaction a cdr_write failure aborts the
+%% enclosing transaction (atomic charge+CDR) rather than returning an error.
+-spec update_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok.
 update_request(Ctx, Imsi, Data) ->
     SessionId    = maps:get(session_id, Data),
     RatingGroups = maps:get(rating_groups, Data, []),
@@ -66,7 +67,7 @@ update_request(Ctx, Imsi, Data) ->
 %% Data :: #{session_id => binary(),
 %%           rating_groups => [#{rating_group  => non_neg_integer(),
 %%                               used_units    => integer()}]}
--spec terminate_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok | {error, term()}.
+-spec terminate_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok.
 terminate_request(Ctx, Imsi, Data) ->
     SessionId    = maps:get(session_id, Data),
     RatingGroups = maps:get(rating_groups, Data, []),

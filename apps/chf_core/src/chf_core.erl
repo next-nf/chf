@@ -197,10 +197,17 @@ do_terminate(Ctx,
     log_charging_error(online_terminate, SessionId, OnlineRes),
     log_charging_error(offline_terminate, SessionId,
                        maybe_offline_terminate(Ctx, Type, Imsi, SessionId, FinalUsed)),
-    %% Terminate always commits: a charging session must end (otherwise it blocks
-    %% re-use and lingers for the sweeper). Balance/CDR failures above are logged
-    %% (and OTEL-recorded in chf_online) so the discrepancy is observable/alertable
-    %% rather than silently swallowed.
+    %% Failure semantics differ by path now that the transaction context is
+    %% explicit:
+    %%  - Online balance ops (chf_online) return {error,_} as VALUES; they are
+    %%    logged + OTEL-recorded here and the terminate still commits (the
+    %%    session must end so it doesn't block re-use / linger for the sweeper).
+    %%  - Offline CDR writes run via the Ctx-aware cdr_write/2 INSIDE this
+    %%    session transaction: a write failure aborts the whole transaction
+    %%    (atomic "session terminated iff CDR written"), so the session is NOT
+    %%    marked terminated and the operation is safely retry-able. On Mnesia a
+    %%    write to a live in-quorum table effectively never fails, so this is
+    %%    only observable under catastrophic failure.
     Terminated = Session#charging_session{
         state         = terminated,
         granted_units = #{},
