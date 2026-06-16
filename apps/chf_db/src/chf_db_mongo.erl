@@ -15,17 +15,17 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_db_mongo.erl — MongoDB backend skeleton for chf_db.
+%% chf_db_mongo.erl — MongoDB backend for chf_db.
 %%
-%% Phase-1 foundation: connection bring-up, index creation, and persistent_term
-%% storage of the topology handle. Codec and full callback implementations are
-%% delivered in subsequent tasks.
+%% This module implements subscriber CRUD, session store/lookup/delete/list_active,
+%% cdr_write/1, and cdr_list/1.  Balance ops and transactions are delivered in
+%% subsequent tasks.
 %%
 %% NOTE: -behaviour(chf_db_backend) is intentionally NOT declared here.
-%% chf_db_backend declares 23 callbacks; this skeleton implements only init/1.
+%% chf_db_backend declares 23 callbacks; this file implements only a subset.
 %% Declaring the behaviour now would emit "callback missing" warnings for the
-%% other 22, which fails the build under warnings_as_errors. The attribute is
-%% added in the task that delivers the final callback (once all 23 exist).
+%% unimplemented ones, which fails the build under warnings_as_errors.
+%% The attribute is added when the final callback is delivered.
 %%
 %% Supervision note: mongoc:connect/3 uses mc_topology:start_link internally,
 %% which links the topology gen_server to the calling process. If the caller
@@ -51,11 +51,33 @@
 
 -export([
     init/1,
-    topology/0
+    topology/0,
+    %% Subscriber
+    subscriber_create/1,
+    subscriber_lookup/1,
+    subscriber_update/1,
+    subscriber_delete/1,
+    %% Session
+    session_store/1,
+    session_lookup/1,
+    session_delete/1,
+    session_list_active/0,
+    %% CDR
+    cdr_write/1,
+    cdr_list/1
 ]).
 
 %%====================================================================
-%% Public API
+%% Collection names
+%%====================================================================
+
+-define(SUBSCRIBERS,       <<"subscribers">>).
+-define(BALANCES,          <<"balances">>).
+-define(CDRS,              <<"cdrs">>).
+-define(CHARGING_SESSIONS, <<"charging_sessions">>).
+
+%%====================================================================
+%% Public API — init / topology
 %%====================================================================
 
 %% init/1 — Connect to the MongoDB replica set, store the topology in
@@ -94,6 +116,189 @@ init(_Opts) ->
 -spec topology() -> pid() | atom().
 topology() ->
     persistent_term:get({chf_db_mongo, topology}).
+
+%%====================================================================
+%% Public API — Subscriber CRUD
+%%====================================================================
+
+%% subscriber_create/1 — Insert a new subscriber document.
+%% Returns {error, already_exists} if the IMSI (_id) is already present.
+-spec subscriber_create(#subscriber{}) -> ok | {error, already_exists | term()}.
+subscriber_create(Sub) ->
+    Doc = chf_db_mongo_codec:from_subscriber(Sub),
+    try with_worker(fun(W) ->
+        {{_Ok, Res}, _} = mc_worker_api:insert(W, ?SUBSCRIBERS, Doc),
+        case maps:get(<<"writeErrors">>, Res, []) of
+            [] ->
+                ok;
+            [#{<<"code">> := 11000} | _] ->
+                {error, already_exists};
+            [#{<<"code">> := Code} | _] ->
+                {error, {write_error, Code}}
+        end
+    end) of
+        {error, _} = Err -> Err;
+        ok               -> ok
+    catch
+        error:{bad_query, #{<<"writeErrors">> := [#{<<"code">> := 11000} | _]}} ->
+            {error, already_exists};
+        error:{bad_query, Doc2} ->
+            {error, {bad_query, Doc2}}
+    end.
+
+%% subscriber_lookup/1 — Find a subscriber by IMSI.
+-spec subscriber_lookup(binary()) -> {ok, #subscriber{}} | {error, not_found}.
+subscriber_lookup(Imsi) ->
+    case with_worker(fun(W) ->
+        mc_worker_api:find_one(W, ?SUBSCRIBERS, #{<<"_id">> => Imsi})
+    end) of
+        undefined ->
+            {error, not_found};
+        Doc when is_map(Doc) ->
+            {ok, chf_db_mongo_codec:to_subscriber(Doc)}
+    end.
+
+%% subscriber_update/1 — Replace an existing subscriber document entirely.
+-spec subscriber_update(#subscriber{}) -> ok | {error, term()}.
+subscriber_update(Sub) ->
+    Doc = chf_db_mongo_codec:from_subscriber(Sub),
+    Imsi = Sub#subscriber.imsi,
+    with_worker(fun(W) ->
+        {true, _} = mc_worker_api:update(W, ?SUBSCRIBERS,
+                                         #{<<"_id">> => Imsi}, Doc,
+                                         false, false),
+        ok
+    end).
+
+%% subscriber_delete/1 — Delete a subscriber by IMSI.
+%% Returns ok regardless of whether a document was found (mirrors Mnesia semantics).
+-spec subscriber_delete(binary()) -> ok.
+subscriber_delete(Imsi) ->
+    with_worker(fun(W) ->
+        mc_worker_api:delete_one(W, ?SUBSCRIBERS, #{<<"_id">> => Imsi}),
+        ok
+    end).
+
+%%====================================================================
+%% Public API — Session persistence
+%%====================================================================
+
+%% session_store/1 — Upsert a charging session (insert or full replace by _id).
+-spec session_store(#charging_session{}) -> ok | {error, term()}.
+session_store(Session) ->
+    Doc = chf_db_mongo_codec:from_session(Session),
+    SessionId = Session#charging_session.session_id,
+    with_worker(fun(W) ->
+        {true, _} = mc_worker_api:update(W, ?CHARGING_SESSIONS,
+                                         #{<<"_id">> => SessionId}, Doc,
+                                         true, false),
+        ok
+    end).
+
+%% session_lookup/1 — Find a charging session by SessionId.
+-spec session_lookup(binary()) -> {ok, #charging_session{}} | {error, not_found}.
+session_lookup(SessionId) ->
+    case with_worker(fun(W) ->
+        mc_worker_api:find_one(W, ?CHARGING_SESSIONS, #{<<"_id">> => SessionId})
+    end) of
+        undefined ->
+            {error, not_found};
+        Doc when is_map(Doc) ->
+            {ok, chf_db_mongo_codec:to_session(Doc)}
+    end.
+
+%% session_delete/1 — Delete a charging session by SessionId.
+%% Returns ok regardless of whether the document existed.
+-spec session_delete(binary()) -> ok.
+session_delete(SessionId) ->
+    with_worker(fun(W) ->
+        mc_worker_api:delete_one(W, ?CHARGING_SESSIONS, #{<<"_id">> => SessionId}),
+        ok
+    end).
+
+%% session_list_active/0 — Return all sessions with state == active.
+-spec session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
+session_list_active() ->
+    Docs = with_worker(fun(W) ->
+        case mc_worker_api:find(W, ?CHARGING_SESSIONS, #{<<"state">> => <<"active">>}) of
+            {ok, Cursor} ->
+                Res = mc_cursor:rest(Cursor),
+                mc_cursor:close(Cursor),
+                Res;
+            [] ->
+                []
+        end
+    end),
+    Sessions = [chf_db_mongo_codec:to_session(D) || D <- Docs],
+    {ok, Sessions}.
+
+%%====================================================================
+%% Public API — CDR operations
+%%====================================================================
+
+%% cdr_write/1 — Insert a CDR document.
+-spec cdr_write(#cdr{}) -> ok | {error, term()}.
+cdr_write(Cdr) ->
+    Doc = chf_db_mongo_codec:from_cdr(Cdr),
+    with_worker(fun(W) ->
+        {{_Ok, _Res}, _} = mc_worker_api:insert(W, ?CDRS, Doc),
+        ok
+    end).
+
+%% cdr_list/1 — List CDRs matching the given filter map.
+%% Supported filter keys: session_id, imsi, type, rating_group.
+%% Unknown keys are silently ignored.
+-spec cdr_list(map()) -> {ok, [#cdr{}]}.
+cdr_list(Filters) ->
+    Selector = build_cdr_selector(Filters),
+    Docs = with_worker(fun(W) ->
+        case mc_worker_api:find(W, ?CDRS, Selector) of
+            {ok, Cursor} ->
+                Res = mc_cursor:rest(Cursor),
+                mc_cursor:close(Cursor),
+                Res;
+            [] ->
+                []
+        end
+    end),
+    Cdrs = [chf_db_mongo_codec:to_cdr(D) || D <- Docs],
+    {ok, Cdrs}.
+
+%%====================================================================
+%% Internal: worker checkout helper
+%%====================================================================
+
+%% with_worker/1 — Check out a poolboy worker from the topology and run Fun(W).
+%% This is a thin wrapper around mongoc:transaction/3 that makes it easy to
+%% write ops without repeating the boilerplate.
+-spec with_worker(fun((pid()) -> term())) -> term().
+with_worker(Fun) ->
+    mongoc:transaction(topology(), fun(#{pool := W}) ->
+        Fun(W)
+    end, #{}).
+
+%%====================================================================
+%% Internal: CDR selector builder
+%%====================================================================
+
+%% build_cdr_selector/1 — Convert a filter map with Erlang-typed values to a
+%% BSON selector map.  Only recognised keys are included; unknown keys are
+%% dropped.  Type and state atoms are stringified via the codec's encoding rules.
+-spec build_cdr_selector(map()) -> map().
+build_cdr_selector(Filters) ->
+    maps:fold(fun
+        (session_id,   V, Acc) -> Acc#{<<"session_id">>   => V};
+        (imsi,         V, Acc) -> Acc#{<<"imsi">>          => V};
+        (type,         V, Acc) -> Acc#{<<"type">>          => type_to_bin(V)};
+        (rating_group, V, Acc) -> Acc#{<<"rating_group">>  => V};
+        (_,            _, Acc) -> Acc
+    end, #{}, Filters).
+
+%% type_to_bin/1 — Encode a type atom for use in a CDR selector.
+-spec type_to_bin(online | offline | converged) -> binary().
+type_to_bin(online)    -> <<"online">>;
+type_to_bin(offline)   -> <<"offline">>;
+type_to_bin(converged) -> <<"converged">>.
 
 %%====================================================================
 %% Internal: keeper process

@@ -27,7 +27,11 @@
 -include_lib("chf_db/include/chf_db.hrl").
 
 all() ->
-    [init_creates_msisdn_index].
+    [init_creates_msisdn_index,
+     subscriber_crud,
+     session_store_lookup_delete,
+     session_list_active_filters,
+     cdr_write_and_list].
 
 %%--------------------------------------------------------------------
 %% Suite init/end
@@ -58,6 +62,27 @@ end_per_suite(_Config) ->
     ok.
 
 %%--------------------------------------------------------------------
+%% Per-test collection cleanup
+%%--------------------------------------------------------------------
+
+init_per_testcase(_TestCase, Config) ->
+    %% Drop all four collections to guarantee clean state.
+    %% We issue drop commands directly; ignore errors if collection doesn't exist.
+    Topology = chf_db_mongo:topology(),
+    Colls = [<<"subscribers">>, <<"balances">>, <<"cdrs">>, <<"charging_sessions">>],
+    lists:foreach(fun(C) ->
+        catch mongoc:transaction(Topology, fun(#{pool := W}) ->
+            mc_worker_api:command(W, #{<<"drop">> => C})
+        end, #{})
+    end, Colls),
+    %% Re-run init to recreate indexes (dropping a collection removes its indexes).
+    ok = chf_db_mongo:init(#{}),
+    Config.
+
+end_per_testcase(_TestCase, _Config) ->
+    ok.
+
+%%--------------------------------------------------------------------
 %% Test cases
 %%--------------------------------------------------------------------
 
@@ -75,9 +100,89 @@ init_creates_msisdn_index(_Config) ->
     end, Indexes),
     ?assert(HasMsisdn).
 
+subscriber_crud(_Config) ->
+    Sub = #subscriber{
+        imsi          = <<"001">>,
+        msisdn        = <<"49001">>,
+        account_id    = <<"a">>,
+        status        = active,
+        rating_groups = #{},
+        created_at    = 0,
+        updated_at    = 0
+    },
+    ok = chf_db_mongo:subscriber_create(Sub),
+    ?assertEqual({error, already_exists}, chf_db_mongo:subscriber_create(Sub)),
+    {ok, Got} = chf_db_mongo:subscriber_lookup(<<"001">>),
+    ?assertEqual(Sub, Got),
+    ok = chf_db_mongo:subscriber_update(Sub#subscriber{status = suspended}),
+    {ok, Up} = chf_db_mongo:subscriber_lookup(<<"001">>),
+    ?assertEqual(suspended, Up#subscriber.status),
+    ok = chf_db_mongo:subscriber_delete(<<"001">>),
+    ?assertEqual({error, not_found}, chf_db_mongo:subscriber_lookup(<<"001">>)).
+
+session_store_lookup_delete(_Config) ->
+    S = #charging_session{
+        session_id    = <<"s">>,
+        imsi          = <<"1">>,
+        type          = online,
+        state         = active,
+        granted_units = #{1 => 100},
+        used_units    = #{},
+        created_at    = 0,
+        updated_at    = 0
+    },
+    ok = chf_db_mongo:session_store(S),
+    {ok, Got} = chf_db_mongo:session_lookup(<<"s">>),
+    ?assertEqual(S, Got),
+    %% upsert — update state to terminated
+    ok = chf_db_mongo:session_store(S#charging_session{state = terminated}),
+    {ok, Up} = chf_db_mongo:session_lookup(<<"s">>),
+    ?assertEqual(terminated, Up#charging_session.state),
+    ok = chf_db_mongo:session_delete(<<"s">>),
+    ?assertEqual({error, not_found}, chf_db_mongo:session_lookup(<<"s">>)).
+
+session_list_active_filters(_Config) ->
+    Sessions = [{<<"a">>, active}, {<<"b">>, active}, {<<"c">>, terminated}],
+    [chf_db_mongo:session_store(mk_session(Id, St)) || {Id, St} <- Sessions],
+    {ok, L} = chf_db_mongo:session_list_active(),
+    Ids = lists:sort([Sx#charging_session.session_id || Sx <- L]),
+    ?assertEqual([<<"a">>, <<"b">>], Ids).
+
+cdr_write_and_list(_Config) ->
+    C1 = mk_cdr(<<"c1">>, <<"s">>),
+    C2 = mk_cdr(<<"c2">>, <<"s">>),
+    C3 = mk_cdr(<<"c3">>, <<"other">>),
+    [ok = chf_db_mongo:cdr_write(C) || C <- [C1, C2, C3]],
+    {ok, L} = chf_db_mongo:cdr_list(#{session_id => <<"s">>}),
+    ?assertEqual(2, length(L)).
+
 %%--------------------------------------------------------------------
 %% Internal helpers
 %%--------------------------------------------------------------------
+
+mk_session(Id, State) ->
+    #charging_session{
+        session_id    = Id,
+        imsi          = <<"imsi">>,
+        type          = online,
+        state         = State,
+        granted_units = #{},
+        used_units    = #{},
+        created_at    = 0,
+        updated_at    = 0
+    }.
+
+mk_cdr(Id, SessionId) ->
+    #cdr{
+        id           = Id,
+        session_id   = SessionId,
+        imsi         = <<"imsi">>,
+        type         = online,
+        rating_group = 1,
+        used_units   = #{input => 0, output => 0, total => 0},
+        timestamp    = 0,
+        metadata     = #{}
+    }.
 
 %% run_command/1 — checks out a worker from the topology stored by chf_db_mongo
 %% and runs a raw BSON command, returning the raw result.
