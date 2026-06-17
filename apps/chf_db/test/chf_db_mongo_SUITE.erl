@@ -91,6 +91,12 @@ init_per_suite(Config) ->
     %% reset it to true so the charging engine accepts requests immediately
     %% (chf_cluster:start_link will recompute it from the corrected cluster_nodes).
     persistent_term:put({chf_cluster, in_quorum}, true),
+    %% chf_core_charging_SUITE's sweeper test leaks an aggressive
+    %% session_idle_timeout=0 / sweep_interval=100 into the chf_core app env.
+    %% Reset to safe values BEFORE chf_core starts below, so its supervised
+    %% sweeper does not terminate this suite's freshly-created sessions mid-test.
+    application:set_env(chf_core, session_idle_timeout, 3600000),
+    application:set_env(chf_core, sweep_interval, 600000),
     %% Ensure the mongodb application and its deps are running first so that
     %% the Mongo driver is available when chf_db_app starts.
     {ok, _} = application:ensure_all_started(mongodb),

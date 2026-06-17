@@ -41,7 +41,7 @@ Session state (granted_units, used_units per RatingGroup) is persisted to Mnesia
 
 ### Pluggable DB backend
 
-`chf_db_backend` defines a behaviour with callbacks for subscriber CRUD, balance operations (topup/reserve/commit/refund), CDR storage, and session persistence. `chf_db_mnesia` is the first implementation. `chf_db.erl` is the public facade that delegates to the configured backend (cached in `persistent_term`). Backend selection: `{chf_db, backend, chf_db_mnesia}` in app env.
+`chf_db_backend` defines a behaviour with callbacks for subscriber CRUD, balance operations (topup/reserve/commit/refund, plus the Ctx-aware `/3` variants used inside `session_transaction`), CDR storage, and session persistence. Two backends implement it: `chf_db_mnesia` (the default — embedded, `disc_copies`, clusterable per W8) and `chf_db_mongo` (a shared central MongoDB replica set; `session_transaction` uses Mongo multi-document transactions, with the client session as the opaque `Ctx`; gives active-active without the W8 quorum machinery). `chf_db.erl` is the public facade that delegates to the configured backend (cached in `persistent_term`). Backend selection: `{chf_db, backend, chf_db_mnesia}` (or `chf_db_mongo`) in app env.
 
 ### Only RatingGroup-based charging
 

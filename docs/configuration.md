@@ -141,8 +141,19 @@ loopback (`127.0.0.1`).
 
 | Parameter | Type | Default | Allowed values | Unit | Description | Effect | Since |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `backend` | atom | `chf_db_mnesia` | `chf_db_mnesia` | — | Selects the DB backend module. The module is resolved at startup and cached in `persistent_term`. | Determines which implementation handles all subscriber, balance, CDR, and session operations. | 0.1.0 |
-| `backend_opts` | map | `#{}` | any map | — | Opaque options passed to the backend's `init/1` callback. The Mnesia backend ignores this key; it is reserved for future backends. | Backend-specific initialisation behaviour. | 0.1.0 |
+| `backend` | atom | `chf_db_mnesia` | `chf_db_mnesia` \| `chf_db_mongo` | — | Selects the DB backend module. The module is resolved at startup and cached in `persistent_term`. | Determines which implementation handles all subscriber, balance, CDR, and session operations. | 0.1.0 |
+| `backend_opts` | map | `#{}` | any map | — | Opaque options passed to the backend's `init/1` callback. The Mnesia backend ignores this key. | Backend-specific initialisation behaviour. | 0.1.0 |
+| `mongo` | map | `#{}` | `#{host, port, replset, database, pool_size}` | — | MongoDB connection settings, used only when `backend = chf_db_mongo`. `host` (string, default `"127.0.0.1"`), `port` (integer, default `27017`), `replset` (binary, e.g. `<<"rs0">>`), `database` (binary, e.g. `<<"chf">>`), `pool_size` (integer). | Connection target/pool for the MongoDB backend. | 0.2.0 |
+
+> [!NOTE]
+> **MongoDB backend (`chf_db_mongo`).** Selecting `{backend, chf_db_mongo}` makes
+> the CHF a stateless front-end to a shared MongoDB **replica set** — Mongo is the
+> consistency point, so multiple CHF nodes run active-active without the W8
+> clustering/quorum machinery (which is for the embedded Mnesia store; see
+> `docs/clustering.md`). A replica set running MongoDB **≥ 4.2 is required**: the
+> charging path (`session_transaction`) uses multi-document transactions to keep a
+> session's session+balance+CDR writes atomic. Mnesia remains the default backend;
+> Mongo is opt-in via the config above.
 
 ### 4.4 `chf_core` parameters
 
