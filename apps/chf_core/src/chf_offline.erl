@@ -23,7 +23,7 @@
 
 -include_lib("chf_db/include/chf_db.hrl").
 
--export([initial_request/2, update_request/2, terminate_request/2]).
+-export([initial_request/3, update_request/3, terminate_request/3]).
 
 %%====================================================================
 %% API
@@ -34,9 +34,8 @@
 %% For offline charging the initial request simply records that the
 %% session has started.  A CDR with zero usage is written per
 %% RatingGroup so that downstream mediation can correlate records.
--spec initial_request(Imsi :: binary(), SessionId :: binary()) ->
-    ok | {error, term()}.
-initial_request(Imsi, SessionId) ->
+-spec initial_request(Ctx :: term(), Imsi :: binary(), SessionId :: binary()) -> ok.
+initial_request(Ctx, Imsi, SessionId) ->
     %% Write a single "session-open" CDR with no usage details.
     Cdr = #cdr{
         id           = chf_db:cdr_generate_id(),
@@ -48,41 +47,44 @@ initial_request(Imsi, SessionId) ->
         timestamp    = erlang:system_time(millisecond),
         metadata     = #{event => session_start}
     },
-    chf_db:cdr_write(Cdr).
+    chf_db:cdr_write(Ctx, Cdr).
 
 %% @doc Write a partial (interim) CDR for each RatingGroup.
 %%
 %% Data :: #{session_id => binary(),
 %%           rating_groups => [#{rating_group  => non_neg_integer(),
 %%                               used_units    => integer()}]}
--spec update_request(Imsi :: binary(), Data :: map()) -> ok | {error, term()}.
-update_request(Imsi, Data) ->
+%% Returns ok; inside a session_transaction a cdr_write failure aborts the
+%% enclosing transaction (atomic charge+CDR) rather than returning an error.
+-spec update_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok.
+update_request(Ctx, Imsi, Data) ->
     SessionId    = maps:get(session_id, Data),
     RatingGroups = maps:get(rating_groups, Data, []),
-    write_usage_cdrs(Imsi, SessionId, RatingGroups, interim).
+    write_usage_cdrs(Ctx, Imsi, SessionId, RatingGroups, interim).
 
 %% @doc Write final CDRs with all usage at session termination.
 %%
 %% Data :: #{session_id => binary(),
 %%           rating_groups => [#{rating_group  => non_neg_integer(),
 %%                               used_units    => integer()}]}
--spec terminate_request(Imsi :: binary(), Data :: map()) -> ok | {error, term()}.
-terminate_request(Imsi, Data) ->
+-spec terminate_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok.
+terminate_request(Ctx, Imsi, Data) ->
     SessionId    = maps:get(session_id, Data),
     RatingGroups = maps:get(rating_groups, Data, []),
-    write_usage_cdrs(Imsi, SessionId, RatingGroups, session_stop).
+    write_usage_cdrs(Ctx, Imsi, SessionId, RatingGroups, session_stop).
 
 %%====================================================================
 %% Internal helpers
 %%====================================================================
 
-%% Write one usage CDR per RatingGroup, collecting any cdr_write failure so the
-%% caller can observe lost billing records rather than have them silently
-%% discarded. Returns ok when every write succeeded, else {error, {cdr_write_errors, [...]}}.
--spec write_usage_cdrs(binary(), binary(), [map()], atom()) -> ok | {error, term()}.
-write_usage_cdrs(Imsi, SessionId, RatingGroups, Event) ->
+%% Write one usage CDR per RatingGroup.  The Ctx-aware cdr_write/2 runs inside
+%% the parent Mnesia activity and returns ok unconditionally; any storage failure
+%% manifests as a transaction abort rather than an {error, _} return, so no
+%% error accumulation is needed here.
+-spec write_usage_cdrs(term(), binary(), binary(), [map()], atom()) -> ok.
+write_usage_cdrs(Ctx, Imsi, SessionId, RatingGroups, Event) ->
     Now = erlang:system_time(millisecond),
-    Errors = lists:foldl(fun(RG, ErrAcc) ->
+    lists:foreach(fun(RG) ->
         RGId = maps:get(rating_group, RG),
         Used = maps:get(used_units, RG, 0),
         Cdr = #cdr{
@@ -95,12 +97,5 @@ write_usage_cdrs(Imsi, SessionId, RatingGroups, Event) ->
             timestamp    = Now,
             metadata     = #{event => Event}
         },
-        case chf_db:cdr_write(Cdr) of
-            ok               -> ErrAcc;
-            {error, Reason}  -> [{RGId, Reason} | ErrAcc]
-        end
-    end, [], RatingGroups),
-    case Errors of
-        [] -> ok;
-        _  -> {error, {cdr_write_errors, lists:reverse(Errors)}}
-    end.
+        ok = chf_db:cdr_write(Ctx, Cdr)
+    end, RatingGroups).

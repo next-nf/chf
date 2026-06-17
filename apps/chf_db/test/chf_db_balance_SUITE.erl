@@ -37,7 +37,11 @@ all() ->
      reserve_up_to_zero_available,
      reserve_up_to_missing_account,
      reserve_up_to_negative_rejected,
-     cdr_id_is_node_tagged].
+     cdr_id_is_node_tagged,
+     reserve_up_to_ctx_in_activity,
+     reserve_up_to_ctx_abort_rolls_back,
+     reserve_up_to_ctx_missing_is_value,
+     cdr_write_ctx_in_activity].
 
 init_per_testcase(_TC, Config) ->
     setup_mnesia(),
@@ -178,3 +182,37 @@ set_total_is_absolute_and_atomic(_) ->
     ?assertEqual(500, B2#balance.total),
     ?assertEqual(0,   B2#balance.reserved),
     ?assertEqual(500, B2#balance.available).
+
+%%--------------------------------------------------------------------
+%% Ctx-aware (/3 and cdr_write/2) variants — must work inside an
+%% enclosing mnesia:activity without aborting the outer transaction.
+%%--------------------------------------------------------------------
+
+reserve_up_to_ctx_in_activity(_) ->
+    ok = seed_balance(<<"acc">>, 1000, 0),
+    R = mnesia:activity(transaction, fun() ->
+            chf_db_mnesia:balance_reserve_up_to(mnesia, <<"acc">>, 400) end),
+    ?assertMatch({ok, 400, _}, R),
+    {ok, B} = chf_db:balance_get(<<"acc">>),
+    ?assertEqual(400, B#balance.reserved).
+
+reserve_up_to_ctx_abort_rolls_back(_) ->
+    ok = seed_balance(<<"acc">>, 1000, 0),
+    catch mnesia:activity(transaction, fun() ->
+            {ok, 400, _} = chf_db_mnesia:balance_reserve_up_to(mnesia, <<"acc">>, 400),
+            mnesia:abort(deliberate) end),
+    {ok, B} = chf_db:balance_get(<<"acc">>),
+    ?assertEqual(0, B#balance.reserved),
+    ?assertEqual(1000, B#balance.available).
+
+reserve_up_to_ctx_missing_is_value(_) ->
+    R = mnesia:activity(transaction, fun() ->
+            {wrapped, chf_db_mnesia:balance_reserve_up_to(mnesia, <<"nope">>, 100)} end),
+    ?assertEqual({wrapped, {error, not_found}}, R).
+
+cdr_write_ctx_in_activity(_) ->
+    Cdr = #cdr{id = <<"c1">>, session_id = <<"s">>, imsi = <<"001">>, type = offline,
+               rating_group = 0, used_units = #{input=>0,output=>0,total=>0},
+               timestamp = 0, metadata = #{}},
+    ok = mnesia:activity(transaction, fun() -> chf_db_mnesia:cdr_write(mnesia, Cdr) end),
+    {ok, [_]} = chf_db:cdr_list(#{session_id => <<"s">>}).

@@ -31,10 +31,14 @@
     balance_topup/2,
     balance_reserve/2,
     balance_reserve_up_to/2,
+    balance_reserve_up_to/3,
     balance_commit/2,
+    balance_commit/3,
     balance_refund/2,
+    balance_refund/3,
     balance_set_total/2,
     cdr_write/1,
+    cdr_write/2,
     cdr_list/1,
     session_store/1,
     session_lookup/1,
@@ -239,63 +243,91 @@ balance_reserve(AccountId, Amount) ->
 balance_reserve_up_to(_AccountId, Amount) when Amount < 0 ->
     {error, invalid_amount};
 balance_reserve_up_to(AccountId, Amount) ->
-    F = fun() ->
-        case mnesia:read(balance, AccountId, write) of
-            [] ->
-                mnesia:abort(not_found);
-            [#balance{available = Avail} = B0] ->
-                Granted     = min(Amount, max(0, Avail)),
-                NewReserved = B0#balance.reserved + Granted,
-                B1 = B0#balance{reserved  = NewReserved,
-                                available = B0#balance.total - NewReserved},
-                ok = mnesia:write(B1),
-                {Granted, B1}
-        end
-    end,
-    case activity(F) of
-        {Granted, #balance{} = B1} -> {ok, Granted, B1};
-        {error, _} = Err           -> Err
+    activity_result(fun() -> reserve_up_to_core(AccountId, Amount) end).
+
+-spec balance_reserve_up_to(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
+    {ok, non_neg_integer(), #balance{}} | {error, term()}.
+%% Ctx-aware variant: runs the core logic directly inside the caller's activity.
+%% Returns {error, not_found} as a value (no abort) so the enclosing transaction
+%% is NOT aborted on a missing account.
+balance_reserve_up_to(_Ctx, _AccountId, Amount) when Amount < 0 ->
+    {error, invalid_amount};
+balance_reserve_up_to(mnesia, AccountId, Amount) ->
+    reserve_up_to_core(AccountId, Amount).
+
+%% Shared value-returning core — MUST NOT call mnesia:abort/1.
+-spec reserve_up_to_core(binary(), integer()) ->
+    {ok, non_neg_integer(), #balance{}} | {error, not_found}.
+reserve_up_to_core(AccountId, Amount) ->
+    case mnesia:read(balance, AccountId, write) of
+        [] ->
+            {error, not_found};
+        [#balance{available = Avail} = B0] ->
+            Granted     = min(Amount, max(0, Avail)),
+            NewReserved = B0#balance.reserved + Granted,
+            B1 = B0#balance{reserved  = NewReserved,
+                            available = B0#balance.total - NewReserved},
+            ok = mnesia:write(B1),
+            {ok, Granted, B1}
     end.
 
 -spec balance_commit(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.
 balance_commit(AccountId, Amount) ->
-    F = fun() ->
-        case mnesia:read(balance, AccountId, write) of
-            [] ->
-                mnesia:abort(not_found);
-            [#balance{} = B0] ->
-                %% Never commit more than is reserved.
-                Commit      = min(max(0, Amount), B0#balance.reserved),
-                NewReserved = B0#balance.reserved - Commit,
-                NewTotal    = B0#balance.total    - Commit,
-                B1 = B0#balance{total     = NewTotal,
-                                reserved  = NewReserved,
-                                available = NewTotal - NewReserved},
-                ok = mnesia:write(B1),
-                B1
-        end
-    end,
-    run_balance_txn(F).
+    activity_result(fun() -> commit_core(AccountId, Amount) end).
+
+-spec balance_commit(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+%% Ctx-aware variant: runs commit_core directly inside the caller's activity.
+%% Returns {error, not_found} as a value (no abort).
+balance_commit(mnesia, AccountId, Amount) ->
+    commit_core(AccountId, Amount).
+
+%% Shared value-returning core — MUST NOT call mnesia:abort/1.
+-spec commit_core(binary(), integer()) -> {ok, #balance{}} | {error, not_found}.
+commit_core(AccountId, Amount) ->
+    case mnesia:read(balance, AccountId, write) of
+        [] ->
+            {error, not_found};
+        [#balance{} = B0] ->
+            %% Never commit more than is reserved.
+            Commit      = min(max(0, Amount), B0#balance.reserved),
+            NewReserved = B0#balance.reserved - Commit,
+            NewTotal    = B0#balance.total    - Commit,
+            B1 = B0#balance{total     = NewTotal,
+                            reserved  = NewReserved,
+                            available = NewTotal - NewReserved},
+            ok = mnesia:write(B1),
+            {ok, B1}
+    end.
 
 -spec balance_refund(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.
 balance_refund(AccountId, Amount) ->
-    F = fun() ->
-        case mnesia:read(balance, AccountId, write) of
-            [] ->
-                mnesia:abort(not_found);
-            [#balance{} = B0] ->
-                %% Never refund more than is reserved.
-                Refund      = min(max(0, Amount), B0#balance.reserved),
-                NewReserved = B0#balance.reserved - Refund,
-                B1 = B0#balance{reserved  = NewReserved,
-                                available = B0#balance.total - NewReserved},
-                ok = mnesia:write(B1),
-                B1
-        end
-    end,
-    run_balance_txn(F).
+    activity_result(fun() -> refund_core(AccountId, Amount) end).
+
+-spec balance_refund(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+%% Ctx-aware variant: runs refund_core directly inside the caller's activity.
+%% Returns {error, not_found} as a value (no abort).
+balance_refund(mnesia, AccountId, Amount) ->
+    refund_core(AccountId, Amount).
+
+%% Shared value-returning core — MUST NOT call mnesia:abort/1.
+-spec refund_core(binary(), integer()) -> {ok, #balance{}} | {error, not_found}.
+refund_core(AccountId, Amount) ->
+    case mnesia:read(balance, AccountId, write) of
+        [] ->
+            {error, not_found};
+        [#balance{} = B0] ->
+            %% Never refund more than is reserved.
+            Refund      = min(max(0, Amount), B0#balance.reserved),
+            NewReserved = B0#balance.reserved - Refund,
+            B1 = B0#balance{reserved  = NewReserved,
+                            available = B0#balance.total - NewReserved},
+            ok = mnesia:write(B1),
+            {ok, B1}
+    end.
 
 -spec balance_set_total(AccountId :: binary(), NewTotal :: integer()) ->
     {ok, #balance{}} | {error, term()}.
@@ -329,6 +361,17 @@ run_balance_txn(F) ->
         {error, _} = Err -> Err
     end.
 
+%% Run Fun inside a new Mnesia activity, converting an abort exit into
+%% {error, Reason}. Used by /2 variants of balance ops whose core funs
+%% return values (not raw records), so the result passes through as-is.
+-spec activity_result(fun()) -> term() | {error, term()}.
+activity_result(F) ->
+    try mnesia:activity(transaction, F)
+    catch
+        exit:{aborted, {chf_session_abort, Reason}} -> {error, Reason};
+        exit:{aborted, Reason}                      -> {error, Reason}
+    end.
+
 %% Run a Mnesia activity, converting an abort exit into {error, Reason}.
 %% mnesia:activity/2 returns the fun's value on success and EXITS with
 %% {aborted, Reason} on abort, so callers must catch the exit here.
@@ -350,6 +393,11 @@ cdr_write(#cdr{} = Cdr) ->
         ok               -> ok;
         {error, _} = Err -> Err
     end.
+
+-spec cdr_write(Ctx :: term(), #cdr{}) -> ok.
+%% Ctx-aware variant: writes the CDR directly inside the caller's activity.
+cdr_write(mnesia, #cdr{} = Cdr) ->
+    mnesia:write(Cdr).
 
 -spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]} | {error, term()}.
 cdr_list(Filters) ->
@@ -413,7 +461,7 @@ session_transaction(SessionId, Fun) ->
             [#charging_session{} = S] -> S;
             []                        -> undefined
         end,
-        case Fun(Current) of
+        case Fun(mnesia, Current) of
             {commit, #charging_session{} = New, Result} ->
                 ok = mnesia:write(New),
                 Result;

@@ -38,11 +38,15 @@
     balance_topup/2,
     balance_reserve/2,
     balance_reserve_up_to/2,
+    balance_reserve_up_to/3,
     balance_commit/2,
+    balance_commit/3,
     balance_refund/2,
+    balance_refund/3,
     balance_set_total/2,
     %% CDR
     cdr_write/1,
+    cdr_write/2,
     cdr_list/1,
     cdr_generate_id/0,
     %% Session
@@ -109,15 +113,30 @@ balance_reserve(AccountId, Amount) ->
 balance_reserve_up_to(AccountId, Amount) ->
     (backend()):balance_reserve_up_to(AccountId, Amount).
 
+-spec balance_reserve_up_to(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
+    {ok, non_neg_integer(), #balance{}} | {error, term()}.
+balance_reserve_up_to(Ctx, AccountId, Amount) ->
+    (backend()):balance_reserve_up_to(Ctx, AccountId, Amount).
+
 -spec balance_commit(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.
 balance_commit(AccountId, Amount) ->
     (backend()):balance_commit(AccountId, Amount).
 
+-spec balance_commit(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+balance_commit(Ctx, AccountId, Amount) ->
+    (backend()):balance_commit(Ctx, AccountId, Amount).
+
 -spec balance_refund(AccountId :: binary(), Amount :: integer()) ->
     {ok, #balance{}} | {error, term()}.
 balance_refund(AccountId, Amount) ->
     (backend()):balance_refund(AccountId, Amount).
+
+-spec balance_refund(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
+    {ok, #balance{}} | {error, term()}.
+balance_refund(Ctx, AccountId, Amount) ->
+    (backend()):balance_refund(Ctx, AccountId, Amount).
 
 -spec balance_set_total(AccountId :: binary(), NewTotal :: integer()) ->
     {ok, #balance{}} | {error, term()}.
@@ -131,6 +150,10 @@ balance_set_total(AccountId, NewTotal) ->
 -spec cdr_write(#cdr{}) -> ok | {error, term()}.
 cdr_write(Cdr) ->
     (backend()):cdr_write(Cdr).
+
+-spec cdr_write(Ctx :: term(), #cdr{}) -> ok.
+cdr_write(Ctx, Cdr) ->
+    (backend()):cdr_write(Ctx, Cdr).
 
 -spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]} | {error, term()}.
 cdr_list(Filters) ->

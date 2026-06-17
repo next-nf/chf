@@ -91,13 +91,26 @@
 -callback balance_reserve_up_to(AccountId :: binary(), Amount :: integer()) ->
     {ok, Granted :: non_neg_integer(), Balance :: term()} | {error, term()}.
 
+%% Ctx-aware variant: runs inside the caller's existing transaction context.
+%% Returns {error, not_found} as a value (never aborts the enclosing transaction).
+-callback balance_reserve_up_to(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
+    {ok, Granted :: non_neg_integer(), Balance :: term()} | {error, term()}.
+
 %% Commit actual spend of Amount against reserved funds; decrement reserved.
 %% MUST be atomic and serialized per AccountId (see contract above).
 -callback balance_commit(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
+%% Ctx-aware variant: runs inside the caller's existing transaction context.
+%% Returns {error, not_found} as a value (never aborts the enclosing transaction).
+-callback balance_commit(Ctx :: term(), AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
+
 %% Return Amount from reserved back to available (e.g. over-estimated grant).
 %% MUST be atomic and serialized per AccountId (see contract above).
 -callback balance_refund(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
+
+%% Ctx-aware variant: runs inside the caller's existing transaction context.
+%% Returns {error, not_found} as a value (never aborts the enclosing transaction).
+-callback balance_refund(Ctx :: term(), AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
 
 %% Set the absolute total balance; available is re-derived as total - reserved.
 %% Must abort with total_below_reserved if NewTotal < current reserved.
@@ -109,6 +122,9 @@
 
 %% Persist a single CDR.
 -callback cdr_write(#cdr{}) -> ok | {error, term()}.
+
+%% Ctx-aware variant: writes the CDR directly inside the caller's activity.
+-callback cdr_write(Ctx :: term(), #cdr{}) -> ok.
 
 %% List CDRs, optionally filtered by a map of field => value constraints.
 -callback cdr_list(Filters :: map()) -> {ok, [#cdr{}]}.
@@ -130,9 +146,14 @@
 -callback session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
 
 %% Run Fun against the current session record (or undefined) inside a single
-%% backend transaction holding a write lock on the session id. Fun returns:
+%% backend transaction holding a write lock on the session id. Fun is called as
+%% Fun(Ctx, Session) where Ctx is a backend-specific context token (atom 'mnesia'
+%% for the Mnesia backend) and Session is the current #charging_session{} or
+%% undefined. Fun returns:
 %%   {commit, NewSession, Result} — write NewSession, return Result
 %%   {result, Result}             — write nothing, return Result
 %%   {abort, Reason}              — roll back, return {error, Reason}
 %% MUST be atomic and serialized per SessionId (see balance contract above).
--callback session_transaction(SessionId :: binary(), Fun :: fun()) -> term() | {error, term()}.
+-callback session_transaction(SessionId :: binary(),
+                              Fun :: fun((Ctx :: term(), Session :: term()) -> term())) ->
+    term() | {error, term()}.

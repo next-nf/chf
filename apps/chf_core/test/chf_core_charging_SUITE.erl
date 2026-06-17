@@ -36,7 +36,9 @@ all() ->
      zero_available_credit_limit_reached,
      multi_rg_drain_leaves_trailing_credit_limited,
      sweeper_registers_globally,
-     charging_fails_closed_out_of_quorum].
+     charging_fails_closed_out_of_quorum,
+     txn_commit_persists_reservation,
+     txn_abort_rolls_back_reservation].
 
 init_per_testcase(_TC, Config) -> setup_mnesia(), Config.
 end_per_testcase(_TC, _Config) -> mnesia:stop(), ok.
@@ -241,3 +243,19 @@ charging_fails_closed_out_of_quorum(_) ->
     B = balance(<<"a">>),
     ?assertEqual(0, B#balance.reserved),
     meck:unload(chf_cluster).
+
+txn_commit_persists_reservation(_) ->
+    ok = seed_subscriber(<<"001">>, <<"a">>, 1000000),
+    {ok, _} = chf_core:create_session(#{session_id=><<"s">>, imsi=><<"001">>, type=>online}),
+    {ok, _} = chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 2000, 0)]}),
+    ?assertEqual(2000, (balance(<<"a">>))#balance.reserved).
+
+txn_abort_rolls_back_reservation(_) ->
+    ok = seed_subscriber(<<"001">>, <<"a">>, 1000000),
+    {ok, _} = chf_core:create_session(#{session_id=><<"s">>, imsi=><<"001">>, type=>online}),
+    R = chf_db:session_transaction(<<"s">>, fun(Ctx, #charging_session{} = _S) ->
+            {ok, _} = chf_online:initial_request(Ctx, <<"001">>, [rg(1, 3000, 0)]),
+            {abort, deliberate}
+        end),
+    ?assertEqual({error, deliberate}, R),
+    ?assertEqual(0, (balance(<<"a">>))#balance.reserved).
