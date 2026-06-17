@@ -390,7 +390,10 @@ balance_refund(AccountId, Amount) ->
 balance_set_total(AccountId, NewTotal) ->
     Pipeline = [
         #{<<"$set">> => #{
-            <<"total">>     => NewTotal,
+            %% $toLong so the persisted total is BSON int64 (uniform with the
+            %% reserved/available fields below and every other write path),
+            %% not int32 for small NewTotal values.
+            <<"total">>     => #{<<"$toLong">> => NewTotal},
             <<"reserved">>  => #{<<"$toLong">> => #{<<"$ifNull">> => [<<"$reserved">>, 0]}},
             <<"available">> => <<"$$REMOVE">>
         }},
@@ -579,8 +582,9 @@ do_session_transaction(_SessionId, _Fun, 0) ->
 do_session_transaction(SessionId, Fun, RetriesLeft) ->
     {ok, #{pool := PoolPid}} = mc_topology:get_pool(topology(), []),
     try poolboy:transaction(PoolPid, fun(W) ->
-        %% Step 1: Start a Mongo server session.
-        {true, SessReply} = mc_worker_api:command(W, {<<"startSession">>, 1}),
+        %% Step 1: Start a Mongo server session. Session-management commands
+        %% target the admin database (uniform with commit/abort below).
+        {true, SessReply} = mc_worker_api:command(<<"admin">>, W, {<<"startSession">>, 1}),
         IdVal = maps:get(<<"id">>, SessReply),
         Lsid  = #{<<"id">> => extract_lsid(IdVal)},
         TxnNumber = ?TXN_NUMBER,
@@ -610,7 +614,7 @@ do_session_transaction(SessionId, Fun, RetriesLeft) ->
         end,
         %% Step 5: Best-effort endSessions so the server session is released
         %% immediately rather than accumulating until the 30-minute timeout.
-        _ = (catch mc_worker_api:command(W, {<<"endSessions">>, [Lsid]})),
+        _ = (catch mc_worker_api:command(<<"admin">>, W, {<<"endSessions">>, [Lsid]})),
         FunResult
     end, 30000)
     catch
