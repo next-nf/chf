@@ -45,49 +45,65 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(cluster, Config) ->
-    %% The CT node must be distributed so peer nodes can connect back.
-    case net_kernel:start([ct_chf_db, shortnames]) of
-        {ok, _}                       -> ok;
-        {error, {already_started, _}} -> ok
-    end,
-    %% Align cookie so Erlang distribution between CT node and peers works.
-    erlang:set_cookie(node(), 'next-chf-cookie'),
-    %% Use connection => 0 (TCP on a random port) instead of standard_io so
-    %% that CT framework IO capture cannot break the peer control channel.
-    {ok, P1, N1} = peer:start(#{name => chf1, connection => 0,
-                                 args => ["-setcookie", "next-chf-cookie"]}),
-    {ok, P2, N2} = peer:start(#{name => chf2, connection => 0,
-                                 args => ["-setcookie", "next-chf-cookie"]}),
-    Nodes = [N1, N2],
-    %% Sequential setup: P1 first (single-node seed), then P2 (joins P1).
-    %% When P1 starts, P2 is alive but has no mnesia yet, so P1 boots as
-    %% single-node seed.  When P2 starts, P1 already has all tables, so P2
-    %% merges P1's schema and adds a disc_copies replica per table.
-    %% MUST NOT be parallelised — P1's init/1 has to fully complete before P2
-    %% calls change_config/2, or both nodes race and seed disjoint schemas
-    %% (see the split-brain KNOWN LIMITATION note in chf_db_mnesia:init/1).
-    lists:foreach(fun(P) -> setup_peer(P, Nodes) end, [P1, P2]),
-    [{peers, [{P1, N1}, {P2, N2}]}, {peer_nodes, Nodes} | Config];
+    %% The CT node must be distributed so peer nodes can connect back. Some CI
+    %% runners can't start distribution (no epmd / restricted networking) — in
+    %% that case SKIP the multi-node group rather than crash init_per_group.
+    case ensure_distributed() of
+        skip -> {skip, no_distribution};
+        ok ->
+            %% Use connection => 0 (TCP on a random port) instead of standard_io
+            %% so CT framework IO capture cannot break the peer control channel.
+            {ok, P1, N1} = peer:start(#{name => chf1, connection => 0,
+                                         args => ["-setcookie", "next-chf-cookie"]}),
+            {ok, P2, N2} = peer:start(#{name => chf2, connection => 0,
+                                         args => ["-setcookie", "next-chf-cookie"]}),
+            Nodes = [N1, N2],
+            %% Sequential setup: P1 first (single-node seed), then P2 (joins P1).
+            %% When P1 starts, P2 is alive but has no mnesia yet, so P1 boots as
+            %% single-node seed.  When P2 starts, P1 already has all tables, so P2
+            %% merges P1's schema and adds a disc_copies replica per table.
+            %% MUST NOT be parallelised — P1's init/1 has to fully complete before
+            %% P2 calls change_config/2, or both nodes race and seed disjoint
+            %% schemas (see the split-brain note in chf_db_mnesia:init/1).
+            lists:foreach(fun(P) -> setup_peer(P, Nodes) end, [P1, P2]),
+            [{peers, [{P1, N1}, {P2, N2}]}, {peer_nodes, Nodes} | Config]
+    end;
 init_per_group(cluster3, Config) ->
-    %% The CT node must be distributed so peer nodes can connect back.
-    case net_kernel:start([ct_chf_db, shortnames]) of
-        {ok, _}                       -> ok;
-        {error, {already_started, _}} -> ok
-    end,
-    erlang:set_cookie(node(), 'next-chf-cookie'),
-    {ok, P1, N1} = peer:start(#{name => chf1, connection => 0,
-                                 args => ["-setcookie", "next-chf-cookie"]}),
-    {ok, P2, N2} = peer:start(#{name => chf2, connection => 0,
-                                 args => ["-setcookie", "next-chf-cookie"]}),
-    {ok, P3, N3} = peer:start(#{name => chf3, connection => 0,
-                                 args => ["-setcookie", "next-chf-cookie"]}),
-    Nodes = [N1, N2, N3],
-    %% Sequential setup: nodes must start one at a time so each subsequent node
-    %% finds a fully-initialised Mnesia schema to merge with.
-    lists:foreach(fun(P) -> setup_peer(P, Nodes) end, [P1, P2, P3]),
-    [{peers3, [{P1, N1}, {P2, N2}, {P3, N3}]}, {peer_nodes3, Nodes} | Config];
+    case ensure_distributed() of
+        skip -> {skip, no_distribution};
+        ok ->
+            {ok, P1, N1} = peer:start(#{name => chf1, connection => 0,
+                                         args => ["-setcookie", "next-chf-cookie"]}),
+            {ok, P2, N2} = peer:start(#{name => chf2, connection => 0,
+                                         args => ["-setcookie", "next-chf-cookie"]}),
+            {ok, P3, N3} = peer:start(#{name => chf3, connection => 0,
+                                         args => ["-setcookie", "next-chf-cookie"]}),
+            Nodes = [N1, N2, N3],
+            %% Sequential setup: nodes start one at a time so each subsequent node
+            %% finds a fully-initialised Mnesia schema to merge with.
+            lists:foreach(fun(P) -> setup_peer(P, Nodes) end, [P1, P2, P3]),
+            [{peers3, [{P1, N1}, {P2, N2}, {P3, N3}]}, {peer_nodes3, Nodes} | Config]
+    end;
 init_per_group(_, Config) ->
     Config.
+
+%% Bring up Erlang distribution (needed for peer nodes), aligning the cookie.
+%% Returns ok, or skip when distribution can't be started (e.g. CI runners
+%% without epmd) so the caller can skip the multi-node group gracefully.
+ensure_distributed() ->
+    Started = case node() of
+        nonode@nohost ->
+            case net_kernel:start([ct_chf_db, shortnames]) of
+                {ok, _}                       -> ok;
+                {error, {already_started, _}} -> ok;
+                {error, _}                    -> skip
+            end;
+        _ -> ok
+    end,
+    case Started of
+        ok   -> erlang:set_cookie(node(), 'next-chf-cookie'), ok;
+        skip -> skip
+    end.
 
 end_per_group(cluster, Config) ->
     lists:foreach(fun({P, _N}) ->
