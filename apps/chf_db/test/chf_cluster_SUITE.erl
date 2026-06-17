@@ -37,7 +37,12 @@ groups() ->
      {cluster3, [], [minority_refuses_to_charge]}].
 
 init_per_suite(Config) -> Config.
-end_per_suite(_Config) -> ok.
+end_per_suite(_Config) ->
+    %% quorum_minority_is_false leaves {chf_cluster, in_quorum} = false in
+    %% persistent_term (global); reset it so later suites (e.g. the Mongo
+    %% backend's charging tests via chf_core:with_quorum) aren't blocked.
+    persistent_term:put({chf_cluster, in_quorum}, true),
+    ok.
 
 init_per_group(cluster, Config) ->
     %% The CT node must be distributed so peer nodes can connect back. Some CI

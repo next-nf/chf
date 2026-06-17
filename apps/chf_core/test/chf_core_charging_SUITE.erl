@@ -41,7 +41,15 @@ all() ->
      txn_abort_rolls_back_reservation].
 
 init_per_testcase(_TC, Config) -> setup_mnesia(), Config.
-end_per_testcase(_TC, _Config) -> mnesia:stop(), ok.
+end_per_testcase(_TC, _Config) ->
+    mnesia:stop(),
+    %% sweeper_survives_stray_message sets aggressive sweep envs; reset to the
+    %% code defaults so they don't leak into later suites whose supervised
+    %% sweeper would otherwise terminate freshly-created sessions (e.g.
+    %% chf_db_mongo_SUITE starting chf_core).
+    application:set_env(chf_core, session_idle_timeout, 300000),
+    application:set_env(chf_core, sweep_interval, 60000),
+    ok.
 
 setup_mnesia() ->
     application:set_env(chf_db, backend, chf_db_mnesia),

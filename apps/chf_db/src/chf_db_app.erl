@@ -21,11 +21,24 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    case chf_db:init() of
-        ok ->
+    case application:get_env(chf_db, backend, chf_db_mnesia) of
+        chf_db_mongo ->
+            %% For the MongoDB backend the connection is owned by the
+            %% chf_db_mongo_conn gen_server, which is a supervised child of
+            %% chf_db_sup (added conditionally in chf_db_sup:init/1).  The
+            %% gen_server calls mongoc:connect/3 and ensure_indexes in its own
+            %% init/1, so there is no pre-sup init step needed here.
             chf_db_sup:start_link();
-        {error, Reason} ->
-            {error, {chf_db_init_failed, Reason}}
+        _Mnesia ->
+            %% For the Mnesia backend, init must run BEFORE the supervisor so
+            %% that the schema and tables exist before chf_cluster (a sup child)
+            %% starts and queries them.
+            case chf_db:init() of
+                ok ->
+                    chf_db_sup:start_link();
+                {error, Reason} ->
+                    {error, {chf_db_init_failed, Reason}}
+            end
     end.
 
 stop(_State) ->
