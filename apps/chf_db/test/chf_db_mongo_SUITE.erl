@@ -56,14 +56,19 @@ all() ->
      mongo_txn_commit_persists,
      mongo_txn_abort_rolls_back,
      %% Supervision: conn gen_server restarts and reconnects on crash
-     conn_supervised_restart].
+     conn_supervised_restart,
+     %% End-to-end charging engine integration over the Mongo backend
+     charging_lifecycle_over_mongo,
+     converged_lifecycle_writes_cdrs_over_mongo,
+     no_double_spend_concurrent_mongo].
 
 %%--------------------------------------------------------------------
 %% Suite init/end
 %%--------------------------------------------------------------------
 
 init_per_suite(Config) ->
-    %% Wire the Mongo backend config
+    %% Wire the Mongo backend config BEFORE starting any application so that
+    %% chf_db_app:start/2 and chf_db_sup:init/1 see the correct backend.
     application:set_env(chf_db, backend, chf_db_mongo),
     application:set_env(chf_db, mongo, #{
         host      => "127.0.0.1",
@@ -72,15 +77,45 @@ init_per_suite(Config) ->
         database  => <<"chf_test">>,
         pool_size => 5
     }),
-    %% Ensure the mongodb application and its deps are running
+    %% Force the chf_db backend facade to use the Mongo module regardless of
+    %% any persistent_term cached by a previously-run suite (e.g. the Mnesia
+    %% suite that ran before us in rebar3 ct).
+    persistent_term:put({chf_db, backend}, chf_db_mongo),
+    %% Reset cluster_nodes to the empty list (= single-node) so that
+    %% chf_cluster:refresh_quorum/0 computes in_quorum=true.  A prior suite
+    %% (chf_cluster_SUITE:quorum_minority_is_false) may have set this to a
+    %% 3-node list that puts the CT node in minority, which would cause
+    %% chf_core:with_quorum/1 to return {error, no_quorum}.
+    application:set_env(chf, cluster_nodes, []),
+    %% Similarly, if an earlier suite cached in_quorum=false in persistent_term,
+    %% reset it to true so the charging engine accepts requests immediately
+    %% (chf_cluster:start_link will recompute it from the corrected cluster_nodes).
+    persistent_term:put({chf_cluster, in_quorum}, true),
+    %% Ensure the mongodb application and its deps are running first so that
+    %% the Mongo driver is available when chf_db_app starts.
     {ok, _} = application:ensure_all_started(mongodb),
-    %% Attempt to init the backend — skip only on genuine failure
-    case catch chf_db_mongo:init(#{}) of
-        ok ->
-            Config;
+    %% Start the full charging engine.  chf_core depends on chf_otel and
+    %% chf_db; chf_db_app (when backend=chf_db_mongo) starts chf_db_mongo_conn
+    %% as a supervised child of chf_db_sup.  Starting the app FIRST means the
+    %% conn gen_server is owned by the supervisor rather than a bare process.
+    %% chf_otel:record_balance_op/2 no-ops when setup_metrics/0 has not run,
+    %% so starting chf_otel without a full OTEL SDK is safe.
+    case catch application:ensure_all_started(chf_core) of
+        {ok, _} ->
+            %% chf_db_mongo:init/1 is now idempotent (conn already running):
+            %% it calls ensure_started/0 which is a no-op when the gen_server
+            %% is already registered, then re-runs ensure_indexes so per-test
+            %% collection drops get fresh indexes.
+            case catch chf_db_mongo:init(#{}) of
+                ok ->
+                    Config;
+                Err ->
+                    ct:pal("chf_db_mongo:init/1 failed: ~p — skipping suite", [Err]),
+                    {skip, no_mongo}
+            end;
         Err ->
-            ct:pal("chf_db_mongo:init/1 failed: ~p — skipping suite", [Err]),
-            {skip, no_mongo}
+            ct:pal("ensure_all_started(chf_core) failed: ~p — skipping suite", [Err]),
+            {skip, no_chf_core}
     end.
 
 end_per_suite(_Config) ->
@@ -381,8 +416,60 @@ conn_supervised_restart(_Config) ->
     {error, not_found} = chf_db_mongo:balance_get(<<"nonexistent_after_restart">>).
 
 %%--------------------------------------------------------------------
+%% End-to-end charging engine integration tests (chf_core → Mongo backend)
+%%--------------------------------------------------------------------
+
+%% charging_lifecycle_over_mongo — prove that a full online charging lifecycle
+%% (create → initial → update → terminate) works end-to-end over the Mongo
+%% backend via the chf_db facade and chf_core charging engine.
+charging_lifecycle_over_mongo(_Config) ->
+    Sub = #subscriber{imsi = <<"001">>, msisdn = <<"49001">>, account_id = <<"a">>,
+                      status = active, rating_groups = #{}, created_at = 0, updated_at = 0},
+    ok = chf_db:subscriber_create(Sub),
+    {ok, _} = chf_db:balance_topup(<<"a">>, 1000000),
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => online}),
+    {ok, _} = chf_core:session_initial(<<"s">>, #{rating_groups => [rg(1, 2000, 0)]}),
+    {ok, _} = chf_core:session_update(<<"s">>, #{rating_groups => [rg(1, 2000, 1500)]}),
+    ok = chf_core:session_terminate(<<"s">>, #{rating_groups => [rg(1, 0, 500)]}),
+    {ok, B} = chf_db:balance_get(<<"a">>),
+    ?assertEqual(1000000 - 2000, B#balance.total),
+    ?assertEqual(0, B#balance.reserved).
+
+%% converged_lifecycle_writes_cdrs_over_mongo — prove that a converged session
+%% writes CDRs transactionally over Mongo in addition to online balance ops.
+converged_lifecycle_writes_cdrs_over_mongo(_Config) ->
+    ok = chf_db:subscriber_create(#subscriber{imsi = <<"002">>, msisdn = <<"49002">>,
+                                              account_id = <<"b">>, status = active,
+                                              rating_groups = #{}, created_at = 0, updated_at = 0}),
+    {ok, _} = chf_db:balance_topup(<<"b">>, 1000000),
+    {ok, _} = chf_core:create_session(#{session_id => <<"c">>, imsi => <<"002">>, type => converged}),
+    {ok, _} = chf_core:session_initial(<<"c">>, #{rating_groups => [rg(1, 2000, 0)]}),
+    ok = chf_core:session_terminate(<<"c">>, #{rating_groups => [rg(1, 0, 0)]}),
+    {ok, Cdrs} = chf_db:cdr_list(#{session_id => <<"c">>}),
+    ?assert(length(Cdrs) >= 1).
+
+%% no_double_spend_concurrent_mongo — prove that 12 concurrent balance_reserve_up_to
+%% calls against a 1000-unit balance never grant more than 1000 total, and that
+%% the reserved field matches the sum of all grants.
+no_double_spend_concurrent_mongo(_Config) ->
+    {ok, _} = chf_db:balance_topup(<<"x">>, 1000),
+    Self = self(),
+    [spawn(fun() -> Self ! {d, chf_db:balance_reserve_up_to(<<"x">>, 100)} end)
+     || _ <- lists:seq(1, 12)],
+    G = lists:sum([receive {d, {ok, Gr, _}} -> Gr; {d, _} -> 0 end
+                   || _ <- lists:seq(1, 12)]),
+    {ok, B} = chf_db:balance_get(<<"x">>),
+    ?assert(G =< 1000),
+    ?assertEqual(B#balance.reserved, G),
+    ?assertEqual(B#balance.available, B#balance.total - B#balance.reserved).
+
+%%--------------------------------------------------------------------
 %% Internal helpers
 %%--------------------------------------------------------------------
+
+%% rg/3 — Build a rating-group request map for use with chf_core:session_*/2.
+rg(Id, Req, Used) ->
+    #{rating_group => Id, requested_units => Req, used_units => Used}.
 
 %% seed_balance_mongo/3 — insert a balance doc directly for test setup.
 seed_balance_mongo(AccountId, Total, Reserved) ->

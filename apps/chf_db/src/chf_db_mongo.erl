@@ -614,15 +614,25 @@ do_session_transaction(SessionId, Fun, RetriesLeft) ->
         FunResult
     end, 30000)
     catch
-        error:{bad_query, #{<<"errorLabels">> := Labels} = _Reply}
-            when is_list(Labels) ->
-            case lists:member(<<"TransientTransactionError">>, Labels)
-                orelse lists:member(<<"UnknownTransactionCommitResult">>, Labels) of
-                true  -> do_session_transaction(SessionId, Fun, RetriesLeft - 1);
-                false -> {error, {mongo_error, Labels}}
-            end;
-        error:Reason ->
-            {error, Reason}
+        error:ExcReason ->
+            %% The mongodb-erlang driver may surface transient transaction errors
+            %% in several wrapping forms:
+            %%   error:{bad_query, #{<<"errorLabels">> := Labels}}
+            %%   error:{error, {op_msg_response, #{<<"errorLabels">> := Labels}}}
+            %%   error:{op_msg_response, #{<<"errorLabels">> := Labels}}
+            %% Rather than pattern-matching on the exact wrapping, extract
+            %% errorLabels from any map found anywhere in the exception reason and
+            %% decide based on the label values.
+            case extract_error_labels(ExcReason) of
+                Labels when is_list(Labels) ->
+                    case lists:member(<<"TransientTransactionError">>, Labels)
+                        orelse lists:member(<<"UnknownTransactionCommitResult">>, Labels) of
+                        true  -> do_session_transaction(SessionId, Fun, RetriesLeft - 1);
+                        false -> {error, {mongo_error, Labels}}
+                    end;
+                not_found ->
+                    {error, ExcReason}
+            end
     end.
 
 %%====================================================================
@@ -884,6 +894,34 @@ compute_refund(#balance{total    = Total,
     NewReserved  = Reserved - Refund,
     NewAvailable = Total    - NewReserved,
     {NewReserved, NewAvailable}.
+
+%%====================================================================
+%% Internal: transaction error label extractor
+%%====================================================================
+
+%% extract_error_labels/1 — Walk an exception reason (possibly nested tuples or
+%% maps) looking for a BSON reply map that contains an <<"errorLabels">> field.
+%% Returns the label list if found, or not_found otherwise.
+%%
+%% The mongodb-erlang driver surfaces transaction errors in at least two forms:
+%%   {bad_query,      #{<<"errorLabels">> := [...]}}   (older code paths)
+%%   {op_msg_response, #{<<"errorLabels">> := [...]}}  (newer write paths)
+%% and both may be further wrapped in {error, ...} tuples.
+-spec extract_error_labels(term()) -> [binary()] | not_found.
+extract_error_labels({_Tag, Inner}) when is_map(Inner) ->
+    case maps:get(<<"errorLabels">>, Inner, not_found) of
+        not_found -> not_found;
+        Labels    -> Labels
+    end;
+extract_error_labels({_Tag, Inner}) ->
+    extract_error_labels(Inner);
+extract_error_labels(Map) when is_map(Map) ->
+    case maps:get(<<"errorLabels">>, Map, not_found) of
+        not_found -> not_found;
+        Labels    -> Labels
+    end;
+extract_error_labels(_) ->
+    not_found.
 
 %%====================================================================
 %% Internal: findAndModify value extractor
