@@ -16,8 +16,9 @@
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 -module(chf_data_sup).
--moduledoc "Top-level supervisor for `chf_data`. Empty for Phase 1 — the accessors\n"
-           "and the `chf_data` seam are stateless; readiness/child wiring lands in Task 7.".
+-moduledoc "Top-level supervisor for `chf_data`. Supervises the CDR outbox drainer\n"
+           "(`chf_cdr_drainer`) which flushes `pending_cdrs` markers from balance\n"
+           "documents into the `cdr` collection with exactly-once effect.".
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
@@ -28,5 +29,10 @@ start_link() ->
 
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
-    ChildSpecs = [],
+    ChildSpecs = [#{id       => chf_cdr_drainer,
+                    start    => {chf_cdr_drainer, start_link, []},
+                    restart  => permanent,
+                    shutdown => 5000,
+                    type     => worker,
+                    modules  => [chf_cdr_drainer]}],
     {ok, {SupFlags, ChildSpecs}}.
