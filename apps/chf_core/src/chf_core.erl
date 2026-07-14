@@ -228,6 +228,14 @@ do_terminate(Session, RequestData) ->
     log_charging_error(online_terminate, SessionId, OnlineRes),
     log_charging_error(offline_terminate, SessionId,
                        maybe_offline_terminate(Type, Imsi, SessionId, FinalUsed)),
+    %% Release any residual balance reservation. For online/converged sessions this
+    %% is already done inside chf_online:terminate_request (with the same
+    %% "-refund" suffix token) so the token ring makes it a no-op. For offline
+    %% sessions the reservation is released here, ensuring quota is reclaimed
+    %% promptly on normal termination (the reconciler catches only crash-orphans).
+    RefundToken = <<IdemBase/binary, "-refund">>,
+    log_charging_error(balance_refund, SessionId,
+                       chf_data:balance_refund(AccountId, SessionId, RefundToken)),
     %% Descriptive session write SECOND.
     Terminated = Session#{?F_STATE         => <<"terminated">>,
                           ?F_GRANTED_UNITS => #{},

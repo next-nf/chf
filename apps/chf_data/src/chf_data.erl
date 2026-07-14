@@ -34,7 +34,7 @@
          %% Balance
          balance_get/1, balance_reserve/5, balance_commit/5, balance_refund/3,
          %% Balance provisioning (operator-facing, distinct from the money ops)
-         balance_topup/2, balance_set_total/2,
+         balance_topup/2, balance_set_total/2, balance_topup_or_set/2,
          %% Session (descriptive-only)
          session_store/1, session_lookup/1, session_delete/1, session_list_active/0,
          %% CDR
@@ -186,6 +186,28 @@ balance_set_total(AccountId, NewTotal) ->
         {ok, Doc, _V}                           -> {ok, chf_balance:from_doc(Doc)};
         {error, {aborted, total_below_reserved}} -> {error, total_below_reserved};
         {error, _} = E                          -> E
+    end.
+
+-doc "Test/ops helper: create-or-raise the balance total for `AccountId` to `Total`.\n"
+     "If the row does not exist it is created with `total = Total`. If the row\n"
+     "exists and its current total is less than `Total`, the total is raised to\n"
+     "`Total`. If the current total is already >= `Total`, the doc is returned\n"
+     "unchanged. This is NOT idempotency-token guarded — it is a provisioning\n"
+     "helper only, not a money operation. Returns the resulting balance map.".
+-spec balance_topup_or_set(AccountId :: binary(), Total :: non_neg_integer()) ->
+    {ok, balance_map()} | {error, term()}.
+balance_topup_or_set(AccountId, Total) ->
+    ok = ensure_balance_row(AccountId),
+    Fun = fun(Doc) ->
+              Current = maps:get(<<"total">>, Doc, 0),
+              case Current >= Total of
+                  true  -> {ok, Doc};
+                  false -> {ok, Doc#{<<"total">> => Total}}
+              end
+          end,
+    case chf_db:update(?BALANCE, AccountId, Fun) of
+        {ok, Doc, _V}  -> {ok, chf_balance:from_doc(Doc)};
+        {error, _} = E -> E
     end.
 
 %% Insert an empty balance row for AccountId if none exists. Idempotent.
