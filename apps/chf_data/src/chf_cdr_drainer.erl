@@ -137,8 +137,10 @@ code_change(_OldVsn, State, _Extra) ->
 %% Returns ok on full success, {error, Reason} on the first infrastructure error.
 -spec do_drain() -> drain_result().
 do_drain() ->
-    {ok, Balances} = chf_db:find(?BALANCE, #{}),
-    drain_balances(Balances).
+    case chf_db:find(?BALANCE, #{}) of
+        {ok, Balances} -> drain_balances(Balances);
+        {error, _} = E -> E
+    end.
 
 -spec drain_balances([chf_balance:doc()]) -> drain_result().
 drain_balances([]) ->
