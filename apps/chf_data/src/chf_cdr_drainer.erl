@@ -136,11 +136,13 @@ code_change(_OldVsn, State, _Extra) ->
 %% do_drain/0 — scan all balance documents, drain each one with pending markers.
 %% Returns ok on full success, {error, Reason} on the first infrastructure error.
 -spec do_drain() -> drain_result().
+%% chf_db:find/2 is a dirty read whose contract is {ok, [doc()]} — it never
+%% returns {error, _} (an infra failure exits the process, and the supervisor
+%% restarts the drainer). So the bare match is correct; do not add an
+%% {error, _} clause (it is unreachable and dialyzer rejects it).
 do_drain() ->
-    case chf_db:find(?BALANCE, #{}) of
-        {ok, Balances} -> drain_balances(Balances);
-        {error, _} = E -> E
-    end.
+    {ok, Balances} = chf_db:find(?BALANCE, #{}),
+    drain_balances(Balances).
 
 -spec drain_balances([chf_balance:doc()]) -> drain_result().
 drain_balances([]) ->
