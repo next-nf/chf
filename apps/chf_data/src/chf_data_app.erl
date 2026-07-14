@@ -16,19 +16,24 @@
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 -module(chf_data_app).
--moduledoc "Application callback for `chf_data`.\n"
-           "\n"
-           "Minimal skeleton for Phase 1: starts the supervisor. The collection\n"
-           "bootstrap and the DB-readiness gate (`chf_data:ensure_collections/0` +\n"
-           "`chf_db:await_ready/1`) are wired here in Task 7; for now the app just\n"
-           "brings up a bare supervisor so the accessors and the `chf_data` seam are\n"
-           "available to callers that manage collection setup themselves.".
+-moduledoc "Application callback for `chf_data`. Declares all collections at startup\n"
+           "and blocks on the DB-readiness gate before returning, so listener apps that\n"
+           "depend on `chf_data` are never started until the backend has completed its\n"
+           "initialisation (`wait_for_tables` returned).".
 -behaviour(application).
 
 -export([start/2, stop/1]).
 
+-define(AWAIT_TIMEOUT_MS, 30000).
+
 -spec start(application:start_type(), term()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
+    ok = chf_data:ensure_collections(),
+    %% Readiness gate: block until the backend reports ready. For the Mnesia
+    %% backend this calls mnesia:wait_for_tables/2 for all local tables. Apps
+    %% that list chf_data in their .app.src `applications` will not start until
+    %% this returns, so no listener can bind before the DB is ready.
+    ok = chf_db:await_ready(?AWAIT_TIMEOUT_MS),
     chf_data_sup:start_link().
 
 -spec stop(term()) -> ok.

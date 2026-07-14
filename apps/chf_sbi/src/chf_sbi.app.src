@@ -18,7 +18,7 @@
 {application, chf_sbi, [
     {vsn, semver},
     {description, "Next-CHF 5G Nchf REST APIs"},
-    {applications, [kernel, stdlib, cowboy, opentelemetry_cowboy_h, chf_core]},
+    {applications, [kernel, stdlib, cowboy, opentelemetry_cowboy_h, chf_core, chf_data]},
     {mod, {chf_sbi_app, []}},
     {registered, []}
 ]}.
