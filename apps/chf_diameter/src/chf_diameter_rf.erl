@@ -104,7 +104,7 @@ handle_request(#diameter_packet{msg = #diameter_rf_ACR{} = ACR},
     Imsi = extract_imsi_username(UserName),
     UsedRGs = chf_diameter_avp:extract_used_units_rf(ServiceInfo),
 
-    Result = handle_acr(RecordType, SessionId, Imsi, UsedRGs),
+    Result = handle_acr(RecordType, SessionId, RecordNum, Imsi, UsedRGs),
 
     ACA = build_aca(SessionId, OH, OR, RecordType, RecordNum, Result),
     {reply, ACA};
@@ -117,7 +117,7 @@ handle_request(#diameter_packet{msg = Msg}, _SvcName, _Peer) ->
 %% Per record-type dispatch
 %%====================================================================
 
-handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_START_RECORD', SessionId, Imsi, _UsedRGs) ->
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_START_RECORD', SessionId, RecordNum, Imsi, _UsedRGs) ->
     case ensure_imsi(Imsi, SessionId) of
         {error, _} = Err -> Err;
         ok ->
@@ -126,7 +126,8 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_START_RECORD', SessionId, Imsi, 
                      type       => offline},
             case chf_core:create_session(Info) of
                 {ok, _SessionId} ->
-                    case chf_core:session_initial(SessionId, #{imsi => Imsi}) of
+                    case chf_core:session_initial(SessionId,
+                             #{imsi => Imsi, cc_request_number => RecordNum}) of
                         {ok, _} -> ok;
                         {error, IErr} ->
                             %% The initial CDR write failed: surface it rather
@@ -142,8 +143,8 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_START_RECORD', SessionId, Imsi, 
             end
     end;
 
-handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_INTERIM_RECORD', SessionId, _Imsi, UsedRGs) ->
-    ReqData = #{rating_groups => UsedRGs},
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_INTERIM_RECORD', SessionId, RecordNum, _Imsi, UsedRGs) ->
+    ReqData = #{cc_request_number => RecordNum, rating_groups => UsedRGs},
     case chf_core:session_update(SessionId, ReqData) of
         {ok, _} -> ok;
         {error, Reason} ->
@@ -152,8 +153,8 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_INTERIM_RECORD', SessionId, _Ims
             {error, error_code(Reason)}
     end;
 
-handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_STOP_RECORD', SessionId, _Imsi, UsedRGs) ->
-    ReqData = #{rating_groups => UsedRGs},
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_STOP_RECORD', SessionId, RecordNum, _Imsi, UsedRGs) ->
+    ReqData = #{cc_request_number => RecordNum, rating_groups => UsedRGs},
     case chf_core:session_terminate(SessionId, ReqData) of
         ok ->
             ok;
@@ -163,7 +164,7 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_STOP_RECORD', SessionId, _Imsi, 
             {error, error_code(Reason)}
     end;
 
-handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_EVENT_RECORD', SessionId, Imsi, UsedRGs) ->
+handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_EVENT_RECORD', SessionId, RecordNum, Imsi, UsedRGs) ->
     %% Event record: single shot — create, record, terminate.
     case ensure_imsi(Imsi, SessionId) of
         {error, _} = Err -> Err;
@@ -173,11 +174,15 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_EVENT_RECORD', SessionId, Imsi, 
                      type       => offline},
             case chf_core:create_session(Info) of
                 {ok, _SessionId} ->
-                    InitRes = chf_core:session_initial(SessionId, #{imsi => Imsi}),
+                    InitRes = chf_core:session_initial(SessionId,
+                                  #{imsi => Imsi, cc_request_number => RecordNum}),
                     %% Always terminate to settle and clean up the short-lived
                     %% event session, even if the initial write reported an error.
+                    %% Same record number, distinct phase tag — the terminate money
+                    %% ops get their own stable tokens.
                     TermRes = chf_core:session_terminate(SessionId,
-                                                          #{rating_groups => UsedRGs}),
+                                  #{cc_request_number => RecordNum,
+                                    rating_groups     => UsedRGs}),
                     case first_error([InitRes, TermRes]) of
                         ok -> ok;
                         {error, EErr} ->
@@ -192,7 +197,7 @@ handle_acr(?'DIAMETER_RF_ACCOUNTING-RECORD-TYPE_EVENT_RECORD', SessionId, Imsi, 
             end
     end;
 
-handle_acr(RecordType, SessionId, _Imsi, _UsedRGs) ->
+handle_acr(RecordType, SessionId, _RecordNum, _Imsi, _UsedRGs) ->
     ?LOG_WARNING("Rf: unknown Accounting-Record-Type=~w session=~s",
                  [RecordType, SessionId]),
     {error, ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'}.

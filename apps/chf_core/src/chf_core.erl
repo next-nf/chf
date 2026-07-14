@@ -28,9 +28,15 @@
            "The balance move happens FIRST; on a crash between the two the balance is\n"
            "authoritative and the session is reconstructable (Task 6 reconciles).\n"
            "\n"
-           "Idempotency tokens are derived from the session id + phase + a per-session\n"
-           "request sequence stamped on the descriptive session, so a retransmitted CCR\n"
-           "at the same sequence re-derives the same token and does not double-charge.".
+           "Idempotency tokens are derived from the CCR request identity — the\n"
+           "(Session-Id, CC-Request-Number) pair carried on the charging request —\n"
+           "plus a phase tag for each money sub-operation. A retransmitted CCR (same\n"
+           "Session-Id, same CC-Request-Number) therefore re-derives the SAME token\n"
+           "for each sub-op, so chf_balance's idempotency ring returns the prior\n"
+           "result without re-charging. The descriptive session's request_seq is\n"
+           "retained for reporting only; it is NO LONGER the money-token source (it\n"
+           "advances on the persisted session AFTER the money ops, so keying the\n"
+           "token on it re-charged a lost-CCA retransmit).".
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -141,7 +147,7 @@ do_initial(Session, RequestData) ->
     SessionId = maps:get(?F_SESSION_ID, Session),
     Held0     = maps:get(?F_GRANTED_UNITS, Session, #{}),
     RatingGroups = maps:get(rating_groups, RequestData, []),
-    Token = idem(SessionId, <<"initial">>, seq(Session)),
+    Token = idem(SessionId, <<"initial">>, RequestData),
     OnlineResult = case is_online(Type) of
         true  -> chf_online:initial_request(SessionId, Imsi, RatingGroups, Held0, Token);
         false -> {ok, #{}}
@@ -174,7 +180,7 @@ do_update(Session, RequestData) ->
     UsedThis  = used_map(RatingGroups),
     NewUsed   = merge_add(Used0, UsedThis),
     UsedTotal = sum(UsedThis),
-    IdemBase  = idem(SessionId, <<"update">>, seq(Session)),
+    IdemBase  = idem(SessionId, <<"update">>, RequestData),
     OnlineResult = case is_online(Type) of
         true  -> chf_online:update_request(SessionId, Imsi, RatingGroups, Held0,
                                            UsedTotal, IdemBase);
@@ -210,7 +216,7 @@ do_terminate(Session, RequestData) ->
     UsedThis  = used_map(RatingGroups),
     FinalUsed = merge_add(Used0, UsedThis),
     UsedTotal = sum(UsedThis),
-    IdemBase  = idem(SessionId, <<"terminate">>, seq(Session)),
+    IdemBase  = idem(SessionId, <<"terminate">>, RequestData),
     %% Authoritative money FIRST: commit the final reported usage and release the
     %% residual hold for the session. Errors are logged + OTEL-recorded but do
     %% NOT block the terminate — the session must end so it does not linger.
@@ -279,16 +285,27 @@ account_id_for(Imsi) ->
         _         -> <<>>
     end.
 
-%% Derive a stable idempotency token from the session id, phase and per-session
-%% request sequence. NOTE (Phase 1): the real CCR request key (Session-Id +
-%% CC-Request-Number) is not threaded into chf_core, so we use the per-session
-%% sequence stamped on the descriptive session as the most stable available key.
-%% A retransmit that re-enters at the same stored sequence re-derives the same
-%% token; once the session advances the sequence, a stale retransmit gets a new
-%% token (the honest Phase-1 limitation — the diameter layer will thread the true
-%% CC-Request-Number in a later task).
-idem(SessionId, Phase, Seq) ->
-    iolist_to_binary([SessionId, $-, Phase, $-, integer_to_binary(Seq)]).
+%% Derive a stable idempotency token from the CCR request identity — the
+%% (Session-Id, CC-Request-Number) pair carried on the charging request — and a
+%% phase tag. The CC-Request-Number is the per-request identity in Gy/Ro/Rf, so a
+%% retransmitted CCR (same Session-Id, same CC-Request-Number) re-derives the SAME
+%% token for the same phase, and chf_balance's idempotency ring returns the prior
+%% result without re-charging. Multiple money sub-ops within one CCR (e.g.
+%% commit/grant/refund) each append their own suffix downstream (chf_online), so
+%% they stay distinct-but-stable.
+%%
+%% Fallback: when no CC-Request-Number is present (an internal, non-CCR caller
+%% such as the sweeper-driven refund, or an SBI request that has no CCR number),
+%% key on the session id + phase alone. A sweeper refund is naturally idempotent
+%% via the terminated-state / absent-reservation check, so the token collapsing to
+%% one value per session+phase is safe there.
+idem(SessionId, Phase, RequestData) ->
+    case maps:find(cc_request_number, RequestData) of
+        {ok, N} when is_integer(N) ->
+            iolist_to_binary([SessionId, $-, Phase, $-, integer_to_binary(N)]);
+        _ ->
+            iolist_to_binary([SessionId, $-, Phase])
+    end.
 
 seq(Session) -> maps:get(?F_REQUEST_SEQ, Session, 0).
 

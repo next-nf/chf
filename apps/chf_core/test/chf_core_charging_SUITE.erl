@@ -45,7 +45,8 @@ all() ->
      multi_rg_drain_leaves_trailing_credit_limited,
      sweeper_registers_globally,
      commit_persists_reservation,
-     insufficient_reserve_is_credit_limited].
+     insufficient_reserve_is_credit_limited,
+     update_retransmit_charges_once].
 
 init_per_suite(Config) ->
     persistent_term:put({chf_db, backend}, chf_db_mnesia),
@@ -251,3 +252,29 @@ insufficient_reserve_is_credit_limited(_) ->
     ?assertEqual(final_grant, Outcome),
     ?assertEqual(100, reserved(<<"a">>)),
     ?assertEqual(0, available(<<"a">>)).
+
+%% A lost CCA causes the client to retransmit the identical CCR-Update (same
+%% Session-Id, same CC-Request-Number, same reported usage). The money must be
+%% charged EXACTLY ONCE: the idempotency token is keyed on the CCR request
+%% identity, so the retransmit re-derives the same token and chf_balance's
+%% idempotency ring returns the prior result without re-committing.
+%%
+%% Under the OLD request_seq-based token this FAILED: the first update advanced the
+%% persisted session's request_seq, so the retransmit derived a DIFFERENT token and
+%% re-charged the reported delta (bounded by the reservation clamp, but a real
+%% double-charge). Passing cc_request_number pins the token per logical request.
+update_retransmit_charges_once(_) ->
+    ok = seed_subscriber(<<"001">>, <<"a">>, 1000000),
+    {ok, _} = chf_core:create_session(#{session_id => <<"s">>, imsi => <<"001">>, type => online}),
+    {ok, _} = chf_core:session_initial(<<"s">>,
+                  #{cc_request_number => 0, rating_groups => [rg(1, 5000, 0)]}),
+    %% CCR-Update at CC-Request-Number = 1 reporting 400 used.
+    Update = #{cc_request_number => 1, rating_groups => [rg(1, 5000, 400)]},
+    {ok, _} = chf_core:session_update(<<"s">>, Update),
+    TotalAfterFirst = total(<<"a">>),
+    ?assertEqual(1000000 - 400, TotalAfterFirst),
+    %% Client retransmits the IDENTICAL update (lost-CCA scenario).
+    {ok, _} = chf_core:session_update(<<"s">>, Update),
+    %% Balance total is UNCHANGED — the 400 was committed exactly once.
+    ?assertEqual(TotalAfterFirst, total(<<"a">>)),
+    assert_invariant(<<"a">>).

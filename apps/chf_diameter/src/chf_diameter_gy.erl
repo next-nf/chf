@@ -98,7 +98,7 @@ handle_request(#diameter_packet{msg = #diameter_ro_CCR{} = CCR},
     Imsi = chf_diameter_avp:extract_imsi(SubIdList),
     RatingGroups = chf_diameter_avp:extract_mscc_ro(MSCCList),
 
-    Result = handle_ccr(ReqType, SessionId, Imsi, RatingGroups),
+    Result = handle_ccr(ReqType, SessionId, ReqNumber, Imsi, RatingGroups),
 
     CCA = build_cca(SessionId, OH, OR, ReqType, ReqNumber, Result),
     {reply, CCA};
@@ -111,7 +111,7 @@ handle_request(#diameter_packet{msg = Msg}, _SvcName, _Peer) ->
 %% Per request-type dispatch
 %%====================================================================
 
-handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, RatingGroups) ->
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, ReqNumber, Imsi, RatingGroups) ->
     case Imsi of
         undefined ->
             ?LOG_WARNING("Gy INITIAL: no IMSI in CCR session=~s", [SessionId]),
@@ -122,8 +122,9 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, Rati
                      type       => online},
             case chf_core:create_session(Info) of
                 {ok, _SessionId} ->
-                    ReqData = #{imsi          => Imsi,
-                                rating_groups => RatingGroups},
+                    ReqData = #{imsi              => Imsi,
+                                cc_request_number => ReqNumber,
+                                rating_groups     => RatingGroups},
                     case chf_core:session_initial(SessionId, ReqData) of
                         {ok, GrantedMap} ->
                             {ok, GrantedMap};
@@ -142,8 +143,8 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, Rati
             end
     end;
 
-handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_UPDATE_REQUEST', SessionId, _Imsi, RatingGroups) ->
-    ReqData = #{rating_groups => RatingGroups},
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_UPDATE_REQUEST', SessionId, ReqNumber, _Imsi, RatingGroups) ->
+    ReqData = #{cc_request_number => ReqNumber, rating_groups => RatingGroups},
     case chf_core:session_update(SessionId, ReqData) of
         {ok, GrantedMap} ->
             {ok, GrantedMap};
@@ -153,8 +154,8 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_UPDATE_REQUEST', SessionId, _Imsi, Rati
             {error, error_code(Reason)}
     end;
 
-handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_TERMINATION_REQUEST', SessionId, _Imsi, RatingGroups) ->
-    ReqData = #{rating_groups => RatingGroups},
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_TERMINATION_REQUEST', SessionId, ReqNumber, _Imsi, RatingGroups) ->
+    ReqData = #{cc_request_number => ReqNumber, rating_groups => RatingGroups},
     case chf_core:session_terminate(SessionId, ReqData) of
         ok ->
             {ok, #{}};
@@ -164,7 +165,7 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_TERMINATION_REQUEST', SessionId, _Imsi,
             {error, error_code(Reason)}
     end;
 
-handle_ccr(ReqType, SessionId, _Imsi, _RatingGroups) ->
+handle_ccr(ReqType, SessionId, _ReqNumber, _Imsi, _RatingGroups) ->
     ?LOG_WARNING("Gy: unknown CC-Request-Type=~w session=~s",
                  [ReqType, SessionId]),
     {error, ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'}.
