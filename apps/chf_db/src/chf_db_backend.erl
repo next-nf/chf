@@ -14,146 +14,52 @@
 %%
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-%% chf_db_backend.erl — Behaviour definition for pluggable CHF database backends
 -module(chf_db_backend).
+-moduledoc "Behaviour for `chf_db` storage backends: an 11-callback document store with\n"
+           "version-as-metadata CAS. Domain semantics live in `chf_data`, not here.\n"
+           "See `database.md` §2 for full contract semantics.".
 
--include_lib("chf_db/include/chf_db.hrl").
+-type collection() :: atom().
+-type key()        :: binary().
+-type doc()        :: #{binary() => term()}.
+-type version()    :: non_neg_integer().
+-type selector()   :: #{binary() => term()}.
+-type index()      :: binary().
+-type coll_opts()  :: #{indexes => [index()], storage => ram_copies | disc_copies}.
 
-%%--------------------------------------------------------------------
-%% Behaviour callbacks
-%%--------------------------------------------------------------------
+-export_type([collection/0, key/0, doc/0, version/0, selector/0, index/0, coll_opts/0]).
 
-%% Initialise the backend with an options map drawn from application env.
--callback init(Opts :: map()) -> ok | {error, term()}.
+-doc "Return the supervisor child spec for the backend's owning process (if any).".
+-callback child_spec(Opts :: map()) -> supervisor:child_spec().
 
-%% ------------------------------------------------------------------
-%% Subscriber operations
-%% ------------------------------------------------------------------
+-doc "Create the collection and declare indexes, idempotent.".
+-callback ensure_collection(collection(), coll_opts()) -> ok | {error, term()}.
 
-%% Create a new subscriber record.
--callback subscriber_create(#subscriber{}) -> ok | {error, term()}.
+-doc "Fetch a document. May use a dirty/lock-free read (P7).".
+-callback get(collection(), key()) -> {ok, doc(), version()} | {error, not_found}.
 
-%% Look up a subscriber by IMSI.
--callback subscriber_lookup(Imsi :: binary()) -> {ok, #subscriber{}} | {error, not_found}.
+-doc "Unconditional upsert. Returns the new version, or `{error, Reason}` on an\n"
+     "infrastructure failure (e.g. an aborted transaction / driver error, §6.1).".
+-callback put(collection(), key(), doc()) -> {ok, version()} | {error, term()}.
 
-%% Overwrite an existing subscriber record.
--callback subscriber_update(#subscriber{}) -> ok | {error, term()}.
+-doc "Write iff stored version == ExpectedVersion, bump version.".
+-callback cas_put(collection(), key(), version(), doc()) ->
+    {ok, version()} | {error, version_conflict} | {error, not_found}.
 
-%% Delete a subscriber by IMSI.
--callback subscriber_delete(Imsi :: binary()) -> ok | {error, term()}.
+-doc "Delete a document. Idempotent.".
+-callback delete(collection(), key()) -> ok.
 
-%% ------------------------------------------------------------------
-%% Balance operations (all amounts in micro-units)
-%%
-%% Atomicity and serialization contract
-%% ------------------------------------
-%% The callbacks balance_reserve, balance_reserve_up_to, balance_commit, and
-%% balance_refund, together with session_transaction, MUST be atomic and
-%% serialized per-subscriber under concurrent multi-node access.  Concurrent
-%% calls for the same AccountId or SessionId must never interleave in a way
-%% that violates the balance invariant (available = total - reserved) or
-%% produces double-spending.
-%%
-%% The Mnesia backend (chf_db_mnesia) satisfies this contract via:
-%%   - Distributed Mnesia transactions:  each balance/session operation runs
-%%     inside mnesia:activity(transaction, …) which acquires a distributed
-%%     write lock on the record before reading it.  Mnesia serializes
-%%     conflicting transactions cluster-wide, so no two nodes can commit
-%%     overlapping changes to the same record simultaneously.
-%%   - disc_copies replicas on every cluster node:  each commit is
-%%     acknowledged by all participating replicas before returning (two-phase
-%%     commit), so there is no stale-read window between nodes.  Note the disc
-%%     write itself is asynchronous (deferred log flush) unless Mnesia is run
-%%     with {sync_log, true}; the no-stale-read guarantee comes from the
-%%     distributed lock + 2PC, not from synchronous disc writes.  Set
-%%     {mnesia, [{sync_log, true}]} in sys.config if strict crash durability
-%%     of money balances is required.
-%%
-%% A future backend (e.g. MongoDB) must satisfy the same contract via an
-%% equivalent mechanism — atomic document-level operations (findAndModify /
-%% update with $inc + optimistic-concurrency retry) or multi-document
-%% transactions with appropriate write concern.
-%% ------------------------------------------------------------------
+-doc "Atomic read-and-delete.".
+-callback take(collection(), key()) -> {ok, doc(), version()} | {error, not_found}.
 
-%% Retrieve the current balance for an account.
--callback balance_get(AccountId :: binary()) -> {ok, #balance{}} | {error, not_found}.
+-doc "Equality-selector query. Scans if no index covers the selector.".
+-callback find(collection(), selector()) -> {ok, [doc()]}.
 
-%% Add Amount to total and available.
--callback balance_topup(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
+-doc "Guaranteed indexed read. Errors if Index is not declared.".
+-callback find_by(collection(), index(), term()) -> {ok, [doc()]} | {error, term()}.
 
-%% Reserve Amount: available must be >= Amount; decrement available, increment reserved.
-%% MUST be atomic and serialized per AccountId (see contract above).
--callback balance_reserve(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
+-doc "Streaming cursor iteration over matching documents.".
+-callback fold(collection(), selector(), fun((doc(), Acc) -> Acc), Acc) -> {ok, Acc}.
 
-%% Reserve up to Amount: grants min(Amount, available); never fails due to insufficient balance.
-%% MUST be atomic and serialized per AccountId (see contract above).
--callback balance_reserve_up_to(AccountId :: binary(), Amount :: integer()) ->
-    {ok, Granted :: non_neg_integer(), Balance :: term()} | {error, term()}.
-
-%% Ctx-aware variant: runs inside the caller's existing transaction context.
-%% Returns {error, not_found} as a value (never aborts the enclosing transaction).
--callback balance_reserve_up_to(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
-    {ok, Granted :: non_neg_integer(), Balance :: term()} | {error, term()}.
-
-%% Commit actual spend of Amount against reserved funds; decrement reserved.
-%% MUST be atomic and serialized per AccountId (see contract above).
--callback balance_commit(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
-
-%% Ctx-aware variant: runs inside the caller's existing transaction context.
-%% Returns {error, not_found} as a value (never aborts the enclosing transaction).
--callback balance_commit(Ctx :: term(), AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
-
-%% Return Amount from reserved back to available (e.g. over-estimated grant).
-%% MUST be atomic and serialized per AccountId (see contract above).
--callback balance_refund(AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
-
-%% Ctx-aware variant: runs inside the caller's existing transaction context.
-%% Returns {error, not_found} as a value (never aborts the enclosing transaction).
--callback balance_refund(Ctx :: term(), AccountId :: binary(), Amount :: integer()) -> {ok, #balance{}} | {error, term()}.
-
-%% Set the absolute total balance; available is re-derived as total - reserved.
-%% Must abort with total_below_reserved if NewTotal < current reserved.
--callback balance_set_total(AccountId :: binary(), NewTotal :: integer()) -> {ok, #balance{}} | {error, term()}.
-
-%% ------------------------------------------------------------------
-%% CDR operations
-%% ------------------------------------------------------------------
-
-%% Persist a single CDR.
--callback cdr_write(#cdr{}) -> ok | {error, term()}.
-
-%% Ctx-aware variant: writes the CDR directly inside the caller's activity.
--callback cdr_write(Ctx :: term(), #cdr{}) -> ok.
-
-%% List CDRs, optionally filtered by a map of field => value constraints.
--callback cdr_list(Filters :: map()) -> {ok, [#cdr{}]}.
-
-%% ------------------------------------------------------------------
-%% Session persistence
-%% ------------------------------------------------------------------
-
-%% Store (insert or overwrite) a charging session.
--callback session_store(#charging_session{}) -> ok | {error, term()}.
-
-%% Retrieve a charging session by SessionId.
--callback session_lookup(SessionId :: binary()) -> {ok, #charging_session{}} | {error, not_found}.
-
-%% Delete a charging session by SessionId.
--callback session_delete(SessionId :: binary()) -> ok | {error, term()}.
-
-%% List all active charging sessions.
--callback session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
-
-%% Run Fun against the current session record (or undefined) inside a single
-%% backend transaction holding a write lock on the session id. Fun is called as
-%% Fun(Ctx, Session) where Ctx is a backend-specific context token (atom 'mnesia'
-%% for the Mnesia backend) and Session is the current #charging_session{} or
-%% undefined. Fun returns:
-%%   {commit, NewSession, Result} — write NewSession, return Result
-%%   {result, Result}             — write nothing, return Result
-%%   {abort, Reason}              — roll back, return {error, Reason}
-%% MUST be atomic and serialized per SessionId (see balance contract above).
--callback session_transaction(SessionId :: binary(),
-                              Fun :: fun((Ctx :: term(), Session :: term()) -> term())) ->
-    term() | {error, term()}.
+-doc "Count of documents matching selector.".
+-callback count(collection(), selector()) -> {ok, non_neg_integer()}.

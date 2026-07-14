@@ -51,6 +51,19 @@ jobs:
       - name: Compile
         run: rebar3 compile
 
+      # Single-node MongoDB replica set for the chf_db_mongo backend suite. The
+      # gated chf_db_mongo_SUITE connects to 127.0.0.1:27017 (its defaults) and
+      # runs; without a reachable Mongo it would skip, so starting it here is
+      # what makes the Mongo backend covered in CI. Podman ships on ubuntu-latest
+      # (the project uses podman, not docker). A replica set is required because
+      # session_transaction uses multi-document transactions.
+      - name: Start MongoDB replica set
+        run: |
+          podman run -d --name mongo -p 27017:27017 docker.io/library/mongo:7 --replSet rs0
+          for i in $(seq 1 30); do podman exec mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' && break; sleep 1; done
+          podman exec mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for i in $(seq 1 30); do [ "$(podman exec mongo mongosh --quiet --eval 'rs.status().ok')" = "1" ] && break; sleep 1; done
+
       - name: Common Test
         run: rebar3 ct
 

@@ -20,7 +20,6 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
--include_lib("chf_db/include/chf_db.hrl").
 
 all() ->
     [put_sets_absolute_total,
@@ -50,11 +49,11 @@ end_per_suite(_Config) ->
 init_per_testcase(_TC, Config) ->
     setup_mnesia(),
     %% Seed subscriber IMSI 001 -> account "a" with total 3000.
-    Sub = #subscriber{imsi = <<"001">>, msisdn = <<"49">>, account_id = <<"a">>,
-                      status = active, rating_groups = #{},
-                      created_at = 0, updated_at = 0},
-    ok = chf_db:subscriber_create(Sub),
-    {ok, _} = chf_db:balance_topup(<<"a">>, 3000),
+    Sub = #{<<"imsi">> => <<"001">>, <<"msisdn">> => <<"49">>,
+            <<"account_id">> => <<"a">>, <<"status">> => <<"active">>,
+            <<"rating_groups">> => #{}, <<"created_at">> => 0, <<"updated_at">> => 0},
+    ok = chf_data:subscriber_create(Sub),
+    {ok, _} = chf_data:balance_topup(<<"a">>, 3000),
     Port = ?config(port, Config),
     {ok, ConnPid} = gun:open("127.0.0.1", Port, #{protocols => [http]}),
     {ok, http} = gun:await_up(ConnPid),
@@ -62,18 +61,20 @@ init_per_testcase(_TC, Config) ->
 
 end_per_testcase(_TC, Config) ->
     gun:close(?config(conn, Config)),
+    catch gen_server:stop(chf_db_mnesia),
     mnesia:stop(),
     ok.
 
 setup_mnesia() ->
     application:set_env(chf_db, backend, chf_db_mnesia),
-    persistent_term:erase({chf_db, backend}),
+    application:set_env(chf_db, backend_opts, #{storage => ram_copies}),
+    persistent_term:put({chf_db, backend}, chf_db_mnesia),
+    catch gen_server:stop(chf_db_mnesia),
     mnesia:stop(),
     ok = mnesia:start(),
-    {atomic, ok} = mnesia:create_table(subscriber,
-        [{attributes, record_info(fields, subscriber)}, {index, [#subscriber.msisdn]}]),
-    {atomic, ok} = mnesia:create_table(balance,
-        [{attributes, record_info(fields, balance)}]),
+    {ok, _Pid} = chf_db_mnesia:start_link(#{}),
+    ok = chf_data:ensure_collections(),
+    ok = chf_db_mnesia:wait_ready([subscriber, balance, charging_session, cdr]),
     ok.
 
 put_req(ConnPid, Path, Body) ->
@@ -115,7 +116,9 @@ put_sets_absolute_total(Config) ->
 
 put_below_reserved_409(Config) ->
     ConnPid = ?config(conn, Config),
-    {ok, _} = chf_db:balance_reserve(<<"a">>, 2000),
+    %% Hold a reservation for a session so the new absolute total (1000) would
+    %% drop below the reserved amount (2000) -> total_below_reserved -> 409.
+    ok = chf_data:balance_reserve(<<"a">>, <<"sess-x">>, <<"1">>, 2000, <<"tok-x">>),
     {Status, _Body} = put_req(ConnPid, "/api/v1/subscribers/001/balance",
                               #{<<"total">> => 1000}),
     ?assertEqual(409, Status).

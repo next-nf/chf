@@ -24,8 +24,6 @@
 %%   DELETE /api/v1/subscribers/:imsi  — delete subscriber
 -module(chf_api_subscriber_h).
 
--include_lib("chf_db/include/chf_db.hrl").
-
 -export([init/2,
          allowed_methods/2,
          content_types_provided/2,
@@ -38,7 +36,7 @@
 %% OTP-29 native record (module-local handler state).
 -record #state{
     imsi       = undefined :: binary() | undefined,
-    subscriber = undefined :: #subscriber{} | undefined
+    subscriber = undefined :: map() | undefined
 }.
 
 %%====================================================================
@@ -65,7 +63,7 @@ resource_exists(Req, #state{imsi = undefined} = State) ->
     %% Return true so POST goes through content_types_accepted.
     {true, Req, State};
 resource_exists(Req, #state{imsi = Imsi} = State) ->
-    case chf_db:subscriber_lookup(Imsi) of
+    case chf_data:subscriber_lookup(Imsi) of
         {ok, Sub} ->
             {true, Req, State#state{subscriber = Sub}};
         {error, not_found} ->
@@ -105,10 +103,8 @@ from_json(Req, State) ->
 %%====================================================================
 
 delete_resource(Req, #state{imsi = Imsi} = State) ->
-    case chf_db:subscriber_delete(Imsi) of
-        ok              -> {true, Req, State};
-        {error, _}      -> {false, Req, State}
-    end.
+    ok = chf_data:subscriber_delete(Imsi),
+    {true, Req, State}.
 
 %%====================================================================
 %% Create logic
@@ -121,22 +117,22 @@ handle_create(Fields, Req, State) ->
         {ok, Imsi, Msisdn, AccountId} ->
             RatingGroups = parse_rating_groups(maps:get(<<"rating_groups">>, Fields, #{})),
             Now = erlang:system_time(millisecond),
-            Sub = #subscriber{
-                imsi          = Imsi,
-                msisdn        = Msisdn,
-                account_id    = AccountId,
-                status        = active,
-                rating_groups = RatingGroups,
-                created_at    = Now,
-                updated_at    = Now
+            Sub = #{
+                <<"imsi">>          => Imsi,
+                <<"msisdn">>        => Msisdn,
+                <<"account_id">>    => AccountId,
+                <<"status">>        => <<"active">>,
+                <<"rating_groups">> => RatingGroups,
+                <<"created_at">>    => Now,
+                <<"updated_at">>    => Now
             },
-            case chf_db:subscriber_create(Sub) of
+            case chf_data:subscriber_create(Sub) of
                 ok ->
-                    _ = chf_db:balance_topup(AccountId, 0),
+                    _ = chf_data:balance_topup(AccountId, 0),
                     Body = chf_api_json:encode_subscriber(Sub),
                     Req2 = cowboy_req:set_resp_body(Body, Req),
                     {{created, <<"/api/v1/subscribers/", Imsi/binary>>}, Req2, State};
-                {error, already_exists} ->
+                {error, exists} ->
                     reply_error(409, <<"subscriber already exists">>, Req, State);
                 {error, Err} ->
                     reply_error(500, format_error(Err), Req, State)
@@ -151,16 +147,17 @@ handle_update(_Fields, Req, #state{subscriber = undefined} = State) ->
     reply_error(404, <<"subscriber not found">>, Req, State);
 handle_update(Fields, Req, #state{subscriber = Existing} = State) ->
     Now = erlang:system_time(millisecond),
-    Updated = Existing#subscriber{
-        msisdn        = maps:get(<<"msisdn">>, Fields, Existing#subscriber.msisdn),
-        status        = parse_status(maps:get(<<"status">>, Fields, Existing#subscriber.status)),
-        rating_groups = case maps:find(<<"rating_groups">>, Fields) of
-                            {ok, RG} -> parse_rating_groups(RG);
-                            error    -> Existing#subscriber.rating_groups
-                        end,
-        updated_at    = Now
+    Updated = Existing#{
+        <<"msisdn">>        => maps:get(<<"msisdn">>, Fields, maps:get(<<"msisdn">>, Existing)),
+        <<"status">>        => parse_status(maps:get(<<"status">>, Fields,
+                                             maps:get(<<"status">>, Existing))),
+        <<"rating_groups">> => case maps:find(<<"rating_groups">>, Fields) of
+                                   {ok, RG} -> parse_rating_groups(RG);
+                                   error    -> maps:get(<<"rating_groups">>, Existing)
+                               end,
+        <<"updated_at">>    => Now
     },
-    case chf_db:subscriber_update(Updated) of
+    case chf_data:subscriber_update(Updated) of
         ok ->
             Body = chf_api_json:encode_subscriber(Updated),
             Req2 = cowboy_req:set_resp_body(Body, Req),
@@ -228,13 +225,10 @@ parse_rg_config(Config) when is_map(Config) ->
 parse_rg_config(_) ->
     #{}.
 
-parse_status(<<"active">>)     -> active;
-parse_status(<<"suspended">>)  -> suspended;
-parse_status(<<"terminated">>) -> terminated;
-parse_status(active)           -> active;
-parse_status(suspended)        -> suspended;
-parse_status(terminated)       -> terminated;
-parse_status(_)                -> active.
+parse_status(<<"active">>)     -> <<"active">>;
+parse_status(<<"suspended">>)  -> <<"suspended">>;
+parse_status(<<"terminated">>) -> <<"terminated">>;
+parse_status(_)                -> <<"active">>.
 
 reply_error(Status, Msg, Req, State) ->
     Body = chf_api_json:encode(#{<<"error">> => Msg}),

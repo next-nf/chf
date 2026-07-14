@@ -18,7 +18,7 @@
 {application, chf_diameter, [
     {vsn, semver},
     {description, "Next-CHF DIAMETER Interface (Gy/Rf)"},
-    {applications, [kernel, stdlib, diameter, chf_core, chf_otel]},
+    {applications, [kernel, stdlib, diameter, chf_core, chf_otel, chf_data]},
     {mod, {chf_diameter_app, []}},
     {registered, []}
 ]}.

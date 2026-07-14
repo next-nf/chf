@@ -18,10 +18,8 @@
 %% chf_web_sessions_h.erl — Session browser handler.
 %%
 %% GET /api/sessions              — list all active session IDs
-%% GET /api/sessions/:session_id  — session detail via chf_db:session_lookup/1
+%% GET /api/sessions/:session_id  — session detail via chf_data:session_lookup/1
 -module(chf_web_sessions_h).
-
--include_lib("chf_db/include/chf_db.hrl").
 
 -export([init/2]).
 
@@ -42,16 +40,12 @@ handle_get(Req0, State) ->
     end.
 
 list_sessions(Req0, State) ->
-    Ids = case chf_db:session_list_active() of
-        {ok, Sessions} ->
-            [S#charging_session.session_id || S <- Sessions];
-        _ ->
-            []
-    end,
+    {ok, Sessions} = chf_data:session_list_active(),
+    Ids = [maps:get(<<"session_id">>, S) || S <- Sessions],
     reply(200, #{<<"session_ids">> => Ids, <<"count">> => length(Ids)}, Req0, State).
 
 get_session(SessionId, Req0, State) ->
-    case chf_db:session_lookup(SessionId) of
+    case chf_data:session_lookup(SessionId) of
         {ok, Session} ->
             reply(200, session_to_map(Session), Req0, State);
         {error, not_found} ->
@@ -62,29 +56,26 @@ get_session(SessionId, Req0, State) ->
 %% Serialisation
 %%====================================================================
 
-session_to_map(#charging_session{
-        session_id    = SId,
-        imsi          = Imsi,
-        type          = Type,
-        state         = StState,
-        granted_units = Granted,
-        used_units    = Used,
-        created_at    = CreatedAt,
-        updated_at    = UpdatedAt}) ->
+session_to_map(Session) ->
+    Granted = maps:get(<<"granted_units">>, Session, #{}),
+    Used    = maps:get(<<"used_units">>, Session, #{}),
     #{
-        <<"session_id">>    => SId,
-        <<"imsi">>          => Imsi,
-        <<"type">>          => atom_to_binary(Type, utf8),
-        <<"state">>         => atom_to_binary(StState, utf8),
-        <<"granted_units">> => maps:fold(fun(K, V, A) ->
-                                    A#{integer_to_binary(K) => V}
-                               end, #{}, Granted),
-        <<"used_units">>    => maps:fold(fun(K, V, A) ->
-                                    A#{integer_to_binary(K) => V}
-                               end, #{}, Used),
-        <<"created_at">>    => CreatedAt,
-        <<"updated_at">>    => UpdatedAt
+        <<"session_id">>    => maps:get(<<"session_id">>, Session, <<>>),
+        <<"imsi">>          => maps:get(<<"imsi">>, Session, <<>>),
+        <<"type">>          => maps:get(<<"type">>, Session, <<>>),
+        <<"state">>         => maps:get(<<"state">>, Session, <<"active">>),
+        <<"granted_units">> => stringify_int_keys(Granted),
+        <<"used_units">>    => stringify_int_keys(Used),
+        <<"created_at">>    => maps:get(<<"created_at">>, Session, 0),
+        <<"updated_at">>    => maps:get(<<"updated_at">>, Session, 0)
     }.
+
+%% JSON object keys must be binaries; the granted/used maps are keyed by integer
+%% rating-group id.
+stringify_int_keys(M) ->
+    maps:fold(fun(K, V, A) when is_integer(K) -> A#{integer_to_binary(K) => V};
+                 (K, V, A)                    -> A#{K => V}
+              end, #{}, M).
 
 %%====================================================================
 %% Helpers

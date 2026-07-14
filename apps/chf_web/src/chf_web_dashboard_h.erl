@@ -66,10 +66,8 @@ collect_metrics() ->
     }.
 
 active_session_count() ->
-    case chf_db:session_list_active() of
-        {ok, Sessions} -> length(Sessions);
-        _              -> 0
-    end.
+    {ok, Sessions} = chf_data:session_list_active(),
+    length(Sessions).
 
 diameter_services() ->
     try

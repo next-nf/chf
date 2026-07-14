@@ -15,19 +15,24 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
--module(chf_db_sup).
--moduledoc "Top supervisor for `chf_db`; starts the configured backend's owning process.".
+-module(chf_data_sup).
+-moduledoc "Top-level supervisor for `chf_data`. Supervises the CDR outbox drainer\n"
+           "(`chf_cdr_drainer`) which flushes `pending_cdrs` markers from balance\n"
+           "documents into the `cdr` collection with exactly-once effect.".
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
 
--spec start_link() -> {ok, pid()} | {error, term()}.
+-spec start_link() -> {ok, pid()}.
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
--spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
-    Backend  = chf_db:backend(),
-    Opts     = application:get_env(chf_db, backend_opts, #{}),
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
-    {ok, {SupFlags, [Backend:child_spec(Opts)]}}.
+    ChildSpecs = [#{id       => chf_cdr_drainer,
+                    start    => {chf_cdr_drainer, start_link, []},
+                    restart  => permanent,
+                    shutdown => 5000,
+                    type     => worker,
+                    modules  => [chf_cdr_drainer]}],
+    {ok, {SupFlags, ChildSpecs}}.

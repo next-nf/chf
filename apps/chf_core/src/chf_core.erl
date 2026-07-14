@@ -16,8 +16,28 @@
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 -module(chf_core).
+-moduledoc "Charging session orchestration over the `chf_data` seam.\n"
+           "\n"
+           "The old `chf_db:session_transaction/2` coupling (session + balance + CDR\n"
+           "in one Mnesia activity) is GONE. Each charging operation is now:\n"
+           "  1. move money via `chf_data:balance_reserve/commit/refund` — the\n"
+           "     AUTHORITATIVE single-document CAS step (a commit stamps the\n"
+           "     pending_cdr inside the balance doc; no inline CDR write); then\n"
+           "  2. write the DESCRIPTIVE `charging_session` via `chf_data:session_store/1`\n"
+           "     (reporting-only reported_used/granted maps, NOT authoritative).\n"
+           "The balance move happens FIRST; on a crash between the two the balance is\n"
+           "authoritative and the session is reconstructable (Task 6 reconciles).\n"
+           "\n"
+           "Idempotency tokens are derived from the CCR request identity — the\n"
+           "(Session-Id, CC-Request-Number) pair carried on the charging request —\n"
+           "plus a phase tag for each money sub-operation. A retransmitted CCR (same\n"
+           "Session-Id, same CC-Request-Number) therefore re-derives the SAME token\n"
+           "for each sub-op, so chf_balance's idempotency ring returns the prior\n"
+           "result without re-charging. The descriptive session's request_seq is\n"
+           "retained for reporting only; it is NO LONGER the money-token source (it\n"
+           "advances on the persisted session AFTER the money ops, so keying the\n"
+           "token on it re-charged a lost-CCA retransmit).".
 
--include_lib("chf_db/include/chf_db.hrl").
 -include_lib("kernel/include/logger.hrl").
 
 -export([
@@ -29,11 +49,22 @@
 ]).
 
 %% Per-rating-group charging outcome returned by session_initial/session_update.
-%% For offline-only sessions the map is empty (no online grant processing).
 -type outcome_map() ::
     #{non_neg_integer() => #{granted => non_neg_integer(),
                              outcome => granted | final_grant | credit_limit_reached}}.
 -export_type([outcome_map/0]).
+
+%% Descriptive-session field literals.
+-define(F_SESSION_ID,    <<"session_id">>).
+-define(F_IMSI,          <<"imsi">>).
+-define(F_ACCOUNT_ID,    <<"account_id">>).
+-define(F_TYPE,          <<"type">>).
+-define(F_STATE,         <<"state">>).
+-define(F_GRANTED_UNITS, <<"granted_units">>).
+-define(F_USED_UNITS,    <<"used_units">>).
+-define(F_REQUEST_SEQ,   <<"request_seq">>).
+-define(F_CREATED_AT,    <<"created_at">>).
+-define(F_UPDATED_AT,    <<"updated_at">>).
 
 %%====================================================================
 %% API
@@ -42,201 +73,199 @@
 -spec create_session(map()) -> {ok, binary()} | {error, term()}.
 create_session(#{session_id := SessionId, imsi := Imsi, type := Type}) ->
     Now = now_ms(),
-    New = #charging_session{
-        session_id    = SessionId,
-        imsi          = Imsi,
-        type          = Type,
-        state         = active,
-        granted_units = #{},
-        used_units    = #{},
-        created_at    = Now,
-        updated_at    = Now
-    },
-    chf_db:session_transaction(SessionId, fun
-        (_Ctx, undefined) ->
-            {commit, New, {ok, SessionId}};
-        (_Ctx, #charging_session{state = terminated}) ->
-            {commit, New, {ok, SessionId}};
-        (_Ctx, #charging_session{state = active}) ->
-            {abort, session_exists}
-    end).
+    New = #{?F_SESSION_ID    => SessionId,
+            ?F_IMSI          => Imsi,
+            ?F_ACCOUNT_ID    => account_id_for(Imsi),
+            ?F_TYPE          => type_to_bin(Type),
+            ?F_STATE         => <<"active">>,
+            ?F_GRANTED_UNITS => #{},
+            ?F_USED_UNITS    => #{},
+            ?F_REQUEST_SEQ   => 0,
+            ?F_CREATED_AT    => Now,
+            ?F_UPDATED_AT    => Now},
+    case chf_data:session_lookup(SessionId) of
+        {ok, #{?F_STATE := <<"active">>}} ->
+            {error, session_exists};
+        _ ->
+            %% undefined / not_found / terminated — (re)create.
+            ok = chf_data:session_store(New),
+            {ok, SessionId}
+    end.
 
 -spec session_initial(SessionId :: binary(), RequestData :: map()) ->
     {ok, outcome_map()} | {error, term()}.
 session_initial(SessionId, RequestData) ->
-    with_quorum(fun() ->
-        chf_db:session_transaction(SessionId, fun
-            (Ctx, #charging_session{state = active} = S) -> do_initial(Ctx, S, RequestData);
-            (_Ctx, #charging_session{state = terminated}) -> {abort, session_terminated};
-            (_Ctx, undefined)                             -> {abort, not_found}
-        end)
-    end).
+    with_active_session(SessionId, fun(S) -> do_initial(S, RequestData) end).
 
 -spec session_update(SessionId :: binary(), RequestData :: map()) ->
     {ok, outcome_map()} | {error, term()}.
 session_update(SessionId, RequestData) ->
-    with_quorum(fun() ->
-        chf_db:session_transaction(SessionId, fun
-            (Ctx, #charging_session{state = active} = S) -> do_update(Ctx, S, RequestData);
-            (_Ctx, #charging_session{state = terminated}) -> {abort, session_terminated};
-            (_Ctx, undefined)                             -> {abort, not_found}
-        end)
-    end).
+    with_active_session(SessionId, fun(S) -> do_update(S, RequestData) end).
 
 -spec session_terminate(SessionId :: binary(), RequestData :: map()) ->
     ok | {error, term()}.
 session_terminate(SessionId, RequestData) ->
-    with_quorum(fun() ->
-        chf_db:session_transaction(SessionId, fun
-            (Ctx, #charging_session{state = active} = S) -> do_terminate(Ctx, S, RequestData);
-            (_Ctx, #charging_session{state = terminated}) -> {result, ok};
-            (_Ctx, undefined)                             -> {abort, not_found}
-        end)
-    end).
+    case chf_data:session_lookup(SessionId) of
+        {ok, #{?F_STATE := <<"active">>} = S} -> do_terminate(S, RequestData);
+        {ok, #{?F_STATE := <<"terminated">>}} -> ok;
+        {error, not_found}                    -> {error, not_found}
+    end.
 
 %% @doc Terminate a session only if it is still stale (used by the sweeper).
-%% The staleness re-check happens under the session write lock against the
-%% current record, closing the snapshot race.
+%% The staleness re-check happens against the current descriptive session.
 -spec session_terminate_if_stale(SessionId :: binary(), MaxAge :: integer()) ->
     ok | skipped | {error, term()}.
 session_terminate_if_stale(SessionId, MaxAge) ->
-    with_quorum(fun() ->
-        Now = now_ms(),
-        chf_db:session_transaction(SessionId, fun
-            (Ctx, #charging_session{state = active, updated_at = U} = S)
-              when (Now - U) > MaxAge ->
-                do_terminate(Ctx, S, #{rating_groups => []});
-            (_Ctx, #charging_session{state = active}) ->
-                {result, skipped};
-            (_Ctx, #charging_session{state = terminated}) ->
-                {result, ok};
-            (_Ctx, undefined) ->
-                {result, {error, not_found}}
-        end)
-    end).
+    Now = now_ms(),
+    case chf_data:session_lookup(SessionId) of
+        {ok, #{?F_STATE := <<"active">>, ?F_UPDATED_AT := U} = S}
+          when (Now - U) > MaxAge ->
+            do_terminate(S, #{rating_groups => []});
+        {ok, #{?F_STATE := <<"active">>}}     -> skipped;
+        {ok, #{?F_STATE := <<"terminated">>}} -> ok;
+        {error, not_found}                    -> {error, not_found}
+    end.
+
+%%====================================================================
+%% Internal — dispatch guard
+%%====================================================================
+
+with_active_session(SessionId, Fun) ->
+    case chf_data:session_lookup(SessionId) of
+        {ok, #{?F_STATE := <<"active">>} = S} -> Fun(S);
+        {ok, #{?F_STATE := <<"terminated">>}} -> {error, session_terminated};
+        {error, not_found}                    -> {error, not_found}
+    end.
 
 %%====================================================================
 %% Internal — Initial
 %%====================================================================
 
-do_initial(Ctx,
-           #charging_session{type = Type, imsi = Imsi, session_id = SessionId,
-                             granted_units = Outstanding0} = Session,
-           RequestData) ->
+do_initial(Session, RequestData) ->
+    Type      = type_atom(maps:get(?F_TYPE, Session)),
+    Imsi      = maps:get(?F_IMSI, Session),
+    SessionId = maps:get(?F_SESSION_ID, Session),
+    Held0     = maps:get(?F_GRANTED_UNITS, Session, #{}),
     RatingGroups = maps:get(rating_groups, RequestData, []),
+    Token = idem(SessionId, <<"initial">>, RequestData),
     OnlineResult = case is_online(Type) of
-        true  -> chf_online:initial_request(Ctx, Imsi, RatingGroups);
+        true  -> chf_online:initial_request(SessionId, Imsi, RatingGroups, Held0, Token);
         false -> {ok, #{}}
     end,
     case OnlineResult of
         {ok, OutcomeMap} ->
             log_charging_error(offline_initial, SessionId,
-                               maybe_offline_initial(Ctx, Type, Imsi, SessionId)),
-            NewOutstanding = add_grants(Outstanding0, granted_amounts(OutcomeMap)),
-            Updated = Session#charging_session{
-                granted_units = NewOutstanding,
-                updated_at    = now_ms()
-            },
-            {commit, Updated, {ok, OutcomeMap}};
+                               maybe_offline_initial(Type, Imsi, SessionId)),
+            NewHeld = add_grants(Held0, granted_amounts(OutcomeMap)),
+            Updated = Session#{?F_GRANTED_UNITS => NewHeld,
+                               ?F_REQUEST_SEQ   => seq(Session) + 1,
+                               ?F_UPDATED_AT    => now_ms()},
+            ok = chf_data:session_store(Updated),
+            {ok, OutcomeMap};
         {error, Reason} ->
-            {abort, Reason}
+            {error, Reason}
     end.
 
 %%====================================================================
 %% Internal — Update
 %%====================================================================
 
-do_update(Ctx,
-          #charging_session{type = Type, imsi = Imsi, session_id = SessionId,
-                            granted_units = Outstanding0,
-                            used_units = Used0} = Session,
-          RequestData) ->
+do_update(Session, RequestData) ->
+    Type      = type_atom(maps:get(?F_TYPE, Session)),
+    Imsi      = maps:get(?F_IMSI, Session),
+    SessionId = maps:get(?F_SESSION_ID, Session),
+    Held0     = maps:get(?F_GRANTED_UNITS, Session, #{}),
+    Used0     = maps:get(?F_USED_UNITS, Session, #{}),
     RatingGroups = maps:get(rating_groups, RequestData, []),
-    UsedThis = used_map(RatingGroups),
-    NewUsed  = merge_add(Used0, UsedThis),
+    UsedThis  = used_map(RatingGroups),
+    NewUsed   = merge_add(Used0, UsedThis),
+    UsedTotal = sum(UsedThis),
+    IdemBase  = idem(SessionId, <<"update">>, RequestData),
     OnlineResult = case is_online(Type) of
-        true  -> chf_online:update_request(Ctx, Imsi, RatingGroups);
+        true  -> chf_online:update_request(SessionId, Imsi, RatingGroups, Held0,
+                                           UsedTotal, IdemBase);
         false -> {ok, #{}}
     end,
     case OnlineResult of
         {ok, OutcomeMap} ->
             log_charging_error(offline_update, SessionId,
-                               maybe_offline_update(Ctx, Type, Imsi, SessionId, RatingGroups)),
-            Outstanding1   = subtract_used(Outstanding0, UsedThis),
-            NewOutstanding = add_grants(Outstanding1, granted_amounts(OutcomeMap)),
-            Updated = Session#charging_session{
-                granted_units = NewOutstanding,
-                used_units    = NewUsed,
-                updated_at    = now_ms()
-            },
-            {commit, Updated, {ok, OutcomeMap}};
+                               maybe_offline_update(Type, Imsi, SessionId, RatingGroups)),
+            Held1   = subtract_used(Held0, UsedThis),
+            NewHeld = add_grants(Held1, granted_amounts(OutcomeMap)),
+            Updated = Session#{?F_GRANTED_UNITS => NewHeld,
+                               ?F_USED_UNITS    => NewUsed,
+                               ?F_REQUEST_SEQ   => seq(Session) + 1,
+                               ?F_UPDATED_AT    => now_ms()},
+            ok = chf_data:session_store(Updated),
+            {ok, OutcomeMap};
         {error, Reason} ->
-            {abort, Reason}
+            {error, Reason}
     end.
 
 %%====================================================================
 %% Internal — Terminate
 %%====================================================================
 
-do_terminate(Ctx,
-             #charging_session{type = Type, imsi = Imsi, session_id = SessionId,
-                               granted_units = Outstanding0,
-                               used_units = Used0} = Session,
-             RequestData) ->
+do_terminate(Session, RequestData) ->
+    Type      = type_atom(maps:get(?F_TYPE, Session)),
+    Imsi      = maps:get(?F_IMSI, Session),
+    SessionId = maps:get(?F_SESSION_ID, Session),
+    AccountId = maps:get(?F_ACCOUNT_ID, Session),
+    Used0     = maps:get(?F_USED_UNITS, Session, #{}),
     RatingGroups = maps:get(rating_groups, RequestData, []),
     UsedThis  = used_map(RatingGroups),
     FinalUsed = merge_add(Used0, UsedThis),
-    RGKeys = lists:usort(maps:keys(Outstanding0) ++ maps:keys(UsedThis)),
-    Instr = [#{rating_group   => RG,
-               used_units     => maps:get(RG, UsedThis, 0),
-               reserved_units => maps:get(RG, Outstanding0, 0)} || RG <- RGKeys],
+    UsedTotal = sum(UsedThis),
+    IdemBase  = idem(SessionId, <<"terminate">>, RequestData),
+    %% Authoritative money FIRST: commit the final reported usage and release the
+    %% residual hold for the session. Errors are logged + OTEL-recorded but do
+    %% NOT block the terminate — the session must end so it does not linger.
     OnlineRes = case is_online(Type) of
-        true  -> chf_online:terminate_request(Ctx, Imsi, Instr);
+        true  -> chf_online:terminate_request(SessionId, Imsi, UsedTotal,
+                                              AccountId, IdemBase);
         false -> ok
     end,
     log_charging_error(online_terminate, SessionId, OnlineRes),
     log_charging_error(offline_terminate, SessionId,
-                       maybe_offline_terminate(Ctx, Type, Imsi, SessionId, FinalUsed)),
-    %% Failure semantics differ by path now that the transaction context is
-    %% explicit:
-    %%  - Online balance ops (chf_online) return {error,_} as VALUES; they are
-    %%    logged + OTEL-recorded here and the terminate still commits (the
-    %%    session must end so it doesn't block re-use / linger for the sweeper).
-    %%  - Offline CDR writes run via the Ctx-aware cdr_write/2 INSIDE this
-    %%    session transaction: a write failure aborts the whole transaction
-    %%    (atomic "session terminated iff CDR written"), so the session is NOT
-    %%    marked terminated and the operation is safely retry-able. On Mnesia a
-    %%    write to a live in-quorum table effectively never fails, so this is
-    %%    only observable under catastrophic failure.
-    Terminated = Session#charging_session{
-        state         = terminated,
-        granted_units = #{},
-        used_units    = FinalUsed,
-        updated_at    = now_ms()
-    },
-    {commit, Terminated, ok}.
+                       maybe_offline_terminate(Type, Imsi, SessionId, FinalUsed)),
+    %% Release any residual balance reservation. For online/converged sessions this
+    %% is already done inside chf_online:terminate_request (with the same
+    %% "-refund" suffix token) so the token ring makes it a no-op. For offline
+    %% sessions the reservation is released here, ensuring quota is reclaimed
+    %% promptly on normal termination (the reconciler catches only crash-orphans).
+    RefundToken = <<IdemBase/binary, "-refund">>,
+    log_charging_error(balance_refund, SessionId,
+                       chf_data:balance_refund(AccountId, SessionId, RefundToken)),
+    %% Descriptive session write SECOND.
+    Terminated = Session#{?F_STATE         => <<"terminated">>,
+                          ?F_GRANTED_UNITS => #{},
+                          ?F_USED_UNITS    => FinalUsed,
+                          ?F_REQUEST_SEQ   => seq(Session) + 1,
+                          ?F_UPDATED_AT    => now_ms()},
+    ok = chf_data:session_store(Terminated),
+    ok.
 
 %%====================================================================
 %% Internal — offline dispatch
 %%====================================================================
 
-maybe_offline_initial(Ctx, Type, Imsi, SessionId) when Type =:= offline; Type =:= converged ->
-    chf_offline:initial_request(Ctx, Imsi, SessionId);
-maybe_offline_initial(_, _, _, _) ->
+maybe_offline_initial(Type, Imsi, SessionId) when Type =:= offline; Type =:= converged ->
+    chf_offline:initial_request(Imsi, SessionId);
+maybe_offline_initial(_, _, _) ->
     ok.
 
-maybe_offline_update(Ctx, Type, Imsi, SessionId, RatingGroups)
+maybe_offline_update(Type, Imsi, SessionId, RatingGroups)
   when Type =:= offline; Type =:= converged ->
-    chf_offline:update_request(Ctx, Imsi, #{session_id => SessionId,
-                                            rating_groups => RatingGroups});
-maybe_offline_update(_, _, _, _, _) ->
+    chf_offline:update_request(Imsi, #{session_id => SessionId,
+                                       rating_groups => RatingGroups});
+maybe_offline_update(_, _, _, _) ->
     ok.
 
-maybe_offline_terminate(Ctx, Type, Imsi, SessionId, FinalUsed)
+maybe_offline_terminate(Type, Imsi, SessionId, FinalUsed)
   when Type =:= offline; Type =:= converged ->
     RGs = [#{rating_group => RG, used_units => U} || {RG, U} <- maps:to_list(FinalUsed)],
-    chf_offline:terminate_request(Ctx, Imsi, #{session_id => SessionId, rating_groups => RGs});
-maybe_offline_terminate(_, _, _, _, _) ->
+    chf_offline:terminate_request(Imsi, #{session_id => SessionId, rating_groups => RGs});
+maybe_offline_terminate(_, _, _, _) ->
     ok.
 
 %%====================================================================
@@ -247,15 +276,46 @@ is_online(online)    -> true;
 is_online(converged) -> true;
 is_online(offline)   -> false.
 
-%% Charging side-effects (balance ops, CDR writes) are best-effort with respect
-%% to the session state machine: a failure must not silently vanish, but neither
-%% should it abort a terminate or leave the session wedged. Log at ERROR so the
-%% inconsistency is observable; chf_online additionally records OTEL outcomes.
-log_charging_error(_Stage, _SessionId, ok)      -> ok;
-log_charging_error(Stage, SessionId, {error, Reason}) ->
-    ?LOG_ERROR("chf_core: ~p for session ~s reported errors; balance/CDR state "
-               "may be inconsistent: ~p", [Stage, SessionId, Reason]),
-    ok.
+type_to_bin(online)    -> <<"online">>;
+type_to_bin(offline)   -> <<"offline">>;
+type_to_bin(converged) -> <<"converged">>.
+
+type_atom(<<"online">>)    -> online;
+type_atom(<<"offline">>)   -> offline;
+type_atom(<<"converged">>) -> converged.
+
+%% account_id lookup for a fresh descriptive session; falls back to <<>> if the
+%% subscriber is not (yet) present. The session is descriptive, so a missing
+%% account_id here is not fatal — online charging re-resolves via the subscriber.
+account_id_for(Imsi) ->
+    case chf_data:subscriber_lookup(Imsi) of
+        {ok, Sub} -> maps:get(<<"account_id">>, Sub, <<>>);
+        _         -> <<>>
+    end.
+
+%% Derive a stable idempotency token from the CCR request identity — the
+%% (Session-Id, CC-Request-Number) pair carried on the charging request — and a
+%% phase tag. The CC-Request-Number is the per-request identity in Gy/Ro/Rf, so a
+%% retransmitted CCR (same Session-Id, same CC-Request-Number) re-derives the SAME
+%% token for the same phase, and chf_balance's idempotency ring returns the prior
+%% result without re-charging. Multiple money sub-ops within one CCR (e.g.
+%% commit/grant/refund) each append their own suffix downstream (chf_online), so
+%% they stay distinct-but-stable.
+%%
+%% Fallback: when no CC-Request-Number is present (an internal, non-CCR caller
+%% such as the sweeper-driven refund, or an SBI request that has no CCR number),
+%% key on the session id + phase alone. A sweeper refund is naturally idempotent
+%% via the terminated-state / absent-reservation check, so the token collapsing to
+%% one value per session+phase is safe there.
+idem(SessionId, Phase, RequestData) ->
+    case maps:find(cc_request_number, RequestData) of
+        {ok, N} when is_integer(N) ->
+            iolist_to_binary([SessionId, $-, Phase, $-, integer_to_binary(N)]);
+        _ ->
+            iolist_to_binary([SessionId, $-, Phase])
+    end.
+
+seq(Session) -> maps:get(?F_REQUEST_SEQ, Session, 0).
 
 now_ms() -> erlang:system_time(millisecond).
 
@@ -266,36 +326,29 @@ used_map(RatingGroups) ->
         Acc#{RGId => maps:get(RGId, Acc, 0) + Used}
     end, #{}, RatingGroups).
 
-add_grants(Outstanding, GrantedMap) ->
+add_grants(Held, GrantedMap) ->
     maps:fold(fun(RGId, Granted, Acc) ->
         Acc#{RGId => maps:get(RGId, Acc, 0) + Granted}
-    end, Outstanding, GrantedMap).
+    end, Held, GrantedMap).
 
-subtract_used(Outstanding, UsedThis) ->
+subtract_used(Held, UsedThis) ->
     maps:fold(fun(RGId, Used, Acc) ->
         Acc#{RGId => max(0, maps:get(RGId, Acc, 0) - Used)}
-    end, Outstanding, UsedThis).
+    end, Held, UsedThis).
 
 merge_add(A, B) ->
     maps:fold(fun(K, V, Acc) -> Acc#{K => maps:get(K, Acc, 0) + V} end, A, B).
 
+sum(M) -> maps:fold(fun(_K, V, Acc) -> Acc + V end, 0, M).
+
 %% Project an outcome map (#{RGId => #{granted => G, outcome => _}}) down to
-%% a plain grant map (#{RGId => G}) for use with add_grants/subtract_used.
+%% a plain grant map (#{RGId => G}).
 -spec granted_amounts(outcome_map()) -> #{non_neg_integer() => non_neg_integer()}.
 granted_amounts(OutcomeMap) ->
     maps:map(fun(_RGId, #{granted := G}) -> G end, OutcomeMap).
 
-%% Guard: only execute Fun() when this node is in quorum (strict majority of
-%% configured cluster nodes reachable).  On a minority partition, charging
-%% mutations are refused with {error, no_quorum} — fail-closed so a split-brain
-%% node cannot double-spend balances while the majority side continues operating.
-%% create_session/1 is intentionally NOT gated: writing a new session record
-%% carries no balance risk.  The session_initial that follows IS gated and will
-%% return no_quorum, so the record is created but never charged; any such
-%% orphaned session is reclaimed by the sweeper once quorum is restored.
--spec with_quorum(fun(() -> R)) -> R | {error, no_quorum}.
-with_quorum(Fun) ->
-    case chf_cluster:in_quorum() of
-        true  -> Fun();
-        false -> {error, no_quorum}
-    end.
+log_charging_error(_Stage, _SessionId, ok) -> ok;
+log_charging_error(Stage, SessionId, {error, Reason}) ->
+    ?LOG_ERROR("chf_core: ~p for session ~s reported errors; balance/CDR state "
+               "may be inconsistent: ~p", [Stage, SessionId, Reason]),
+    ok.

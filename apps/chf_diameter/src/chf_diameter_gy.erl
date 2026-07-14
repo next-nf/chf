@@ -98,7 +98,7 @@ handle_request(#diameter_packet{msg = #diameter_ro_CCR{} = CCR},
     Imsi = chf_diameter_avp:extract_imsi(SubIdList),
     RatingGroups = chf_diameter_avp:extract_mscc_ro(MSCCList),
 
-    Result = handle_ccr(ReqType, SessionId, Imsi, RatingGroups),
+    Result = handle_ccr(ReqType, SessionId, ReqNumber, Imsi, RatingGroups),
 
     CCA = build_cca(SessionId, OH, OR, ReqType, ReqNumber, Result),
     {reply, CCA};
@@ -111,7 +111,7 @@ handle_request(#diameter_packet{msg = Msg}, _SvcName, _Peer) ->
 %% Per request-type dispatch
 %%====================================================================
 
-handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, RatingGroups) ->
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, ReqNumber, Imsi, RatingGroups) ->
     case Imsi of
         undefined ->
             ?LOG_WARNING("Gy INITIAL: no IMSI in CCR session=~s", [SessionId]),
@@ -122,8 +122,9 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, Rati
                      type       => online},
             case chf_core:create_session(Info) of
                 {ok, _SessionId} ->
-                    ReqData = #{imsi          => Imsi,
-                                rating_groups => RatingGroups},
+                    ReqData = #{imsi              => Imsi,
+                                cc_request_number => ReqNumber,
+                                rating_groups     => RatingGroups},
                     case chf_core:session_initial(SessionId, ReqData) of
                         {ok, GrantedMap} ->
                             {ok, GrantedMap};
@@ -142,8 +143,8 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_INITIAL_REQUEST', SessionId, Imsi, Rati
             end
     end;
 
-handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_UPDATE_REQUEST', SessionId, _Imsi, RatingGroups) ->
-    ReqData = #{rating_groups => RatingGroups},
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_UPDATE_REQUEST', SessionId, ReqNumber, _Imsi, RatingGroups) ->
+    ReqData = #{cc_request_number => ReqNumber, rating_groups => RatingGroups},
     case chf_core:session_update(SessionId, ReqData) of
         {ok, GrantedMap} ->
             {ok, GrantedMap};
@@ -153,8 +154,8 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_UPDATE_REQUEST', SessionId, _Imsi, Rati
             {error, error_code(Reason)}
     end;
 
-handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_TERMINATION_REQUEST', SessionId, _Imsi, RatingGroups) ->
-    ReqData = #{rating_groups => RatingGroups},
+handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_TERMINATION_REQUEST', SessionId, ReqNumber, _Imsi, RatingGroups) ->
+    ReqData = #{cc_request_number => ReqNumber, rating_groups => RatingGroups},
     case chf_core:session_terminate(SessionId, ReqData) of
         ok ->
             {ok, #{}};
@@ -164,7 +165,7 @@ handle_ccr(?'DIAMETER_RO_CC-REQUEST-TYPE_TERMINATION_REQUEST', SessionId, _Imsi,
             {error, error_code(Reason)}
     end;
 
-handle_ccr(ReqType, SessionId, _Imsi, _RatingGroups) ->
+handle_ccr(ReqType, SessionId, _ReqNumber, _Imsi, _RatingGroups) ->
     ?LOG_WARNING("Gy: unknown CC-Request-Type=~w session=~s",
                  [ReqType, SessionId]),
     {error, ?'DIAMETER_BASE_RESULT-CODE_UNABLE_TO_COMPLY'}.
@@ -196,7 +197,6 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
 
 %% map the charging result to a metric-friendly outcome atom
 outcome_atom({ok, _})                          -> success;
-outcome_atom({error, ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED'}) -> insufficient_balance;
 outcome_atom({error, ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN'})         -> user_unknown;
 outcome_atom({error, ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID'}) -> unknown_session;
 outcome_atom({error, _})                       -> unable_to_comply.
@@ -205,8 +205,12 @@ outcome_atom({error, _})                       -> unable_to_comply.
 %% Error code mapping
 %%====================================================================
 
-error_code(no_quorum)            -> ?'DIAMETER_BASE_RESULT-CODE_TOO_BUSY';
-error_code(insufficient_balance) -> ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED';
+%% NOTE (Phase 1 data-layer cutover): chf_core no longer surfaces `no_quorum`
+%% (the quorum gate is retired — reintroduced deliberately in Phase 2) nor a bare
+%% `insufficient_balance` (online charging absorbs credit exhaustion into the
+%% per-RG grant outcome, returning {ok, OutcomeMap}). Those defensive clauses were
+%% therefore removed; the `_` catch-all maps any unexpected reason to
+%% UNABLE_TO_COMPLY.
 error_code(subscriber_suspended) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
 error_code(subscriber_terminated) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
 error_code(subscriber_not_found) -> ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN';

@@ -14,461 +14,326 @@
 %%
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-%% chf_db_mnesia.erl — Mnesia backend implementation for chf_db
 -module(chf_db_mnesia).
+-moduledoc "Mnesia backend for `chf_db`. Implements the 11-callback contract via a\n"
+           "generic envelope with promoted index columns (database.md §3.1).\n"
+           "\n"
+           "Table layout: `attributes = [key | AtomIdxFields] ++ [version, doc]`.\n"
+           "Binary index names from `coll_opts()` are converted to atoms for Mnesia\n"
+           "attribute names; the mapping is stored in `persistent_term` keyed by\n"
+           "`{chf_db_mnesia, Coll, idx}` (node-global, txn-safe) so `find_by` can resolve names to positions.\n"
+           "\n"
+           "Read ops (`get`, `find`, `find_by`, `count`) are dirty/lock-free (P7).\n"
+           "`cas_put` and `take` use `mnesia:transaction`. `fold` uses `async_dirty`.\n"
+           "\n"
+           "Default storage is `disc_copies`. When `disc_copies` or `disc_only_copies`\n"
+           "is configured, `ensure_collection/2` bootstraps the on-disc Mnesia schema\n"
+           "before creating the table (DISC-SCHEMA-AT-BOOT). This gate is skipped for\n"
+           "`ram_copies` so CI/test runs stay disc-free.".
 -behaviour(chf_db_backend).
+-behaviour(gen_server).
 
--include_lib("chf_db/include/chf_db.hrl").
+%% Public API
+-export([child_spec/1, start_link/1, wait_ready/1, wait_ready_timeout/2]).
 
--export([
-    init/1,
-    subscriber_create/1,
-    subscriber_lookup/1,
-    subscriber_update/1,
-    subscriber_delete/1,
-    balance_get/1,
-    balance_topup/2,
-    balance_reserve/2,
-    balance_reserve_up_to/2,
-    balance_reserve_up_to/3,
-    balance_commit/2,
-    balance_commit/3,
-    balance_refund/2,
-    balance_refund/3,
-    balance_set_total/2,
-    cdr_write/1,
-    cdr_write/2,
-    cdr_list/1,
-    session_store/1,
-    session_lookup/1,
-    session_delete/1,
-    session_list_active/0,
-    session_transaction/2
-]).
+%% chf_db_backend callbacks
+-export([ensure_collection/2, get/2, put/3, cas_put/4, delete/2,
+         take/2, find/2, find_by/3, fold/4, count/2]).
 
-%% cdr_list/1 and session_list_active/0 build Mnesia match-object patterns by
-%% assigning the wildcard atom '_' to typed record fields (e.g. used_units,
-%% timestamp, state). That is the idiomatic Mnesia query form and is correct at
-%% runtime, but it violates the records' static field types, which dialyzer
-%% (rightly, for ordinary construction) flags — and the resulting none() return
-%% then cascades into a spurious "no local return". Suppress these two.
--dialyzer({nowarn_function, [cdr_list/1, session_list_active/0]}).
+%% gen_server callbacks
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
-%%====================================================================
-%% Backend API — init/1
-%%====================================================================
+%%--------------------------------------------------------------------
+%% child_spec / start_link
+%%--------------------------------------------------------------------
 
--spec init(Opts :: map()) -> ok | {error, term()}.
+-doc "Child spec for `chf_db_sup`.".
+-spec child_spec(map()) -> supervisor:child_spec().
+child_spec(Opts) ->
+    #{id      => ?MODULE,
+      start   => {?MODULE, start_link, [Opts]},
+      restart => permanent,
+      type    => worker}.
+
+-spec start_link(map()) -> {ok, pid()} | {error, term()}.
+start_link(Opts) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, Opts, []).
+
+-doc "Wait until all listed tables (or a single table) are ready (loaded into Mnesia).\n"
+     "Uses a default timeout of 5 000 ms.".
+-spec wait_ready([atom()] | atom()) -> ok | {error, term()}.
+wait_ready(Colls) when is_list(Colls) ->
+    wait_ready_timeout(Colls, 5000);
+wait_ready(Coll) when is_atom(Coll) ->
+    wait_ready([Coll]).
+
+-doc "Wait until all listed tables are ready with an explicit timeout.\n"
+     "Returns `ok` when all tables are loaded, `{error, Reason}` on timeout or failure.".
+-spec wait_ready_timeout([atom()], timeout()) -> ok | {error, term()}.
+wait_ready_timeout(Colls, Timeout) ->
+    case mnesia:wait_for_tables(Colls, Timeout) of
+        ok              -> ok;
+        {timeout, Tabs} -> {error, {timeout, Tabs}};
+        {error, Reason} -> {error, Reason}
+    end.
+
+%%--------------------------------------------------------------------
+%% gen_server callbacks
+%%--------------------------------------------------------------------
+
+-spec init(map()) -> {ok, map()}.
 init(_Opts) ->
-    %% Find reachable cluster peers.  We ping here so that a node that is
-    %% configured but not yet up is simply skipped (it will join later via its
-    %% own init call or a Mnesia reconnect).
-    %%
-    %% KNOWN LIMITATION — split-brain on simultaneous cold start: the seed/join
-    %% decision below gates on Erlang VM reachability (net_adm:ping), not on
-    %% whether the peer's Mnesia is already running.  If every node in a fresh
-    %% cluster cold-starts at the same instant, two nodes can each see the
-    %% other's VM yet reach change_config/2 before the other's Mnesia exists,
-    %% and each then seeds its own disjoint single-node schema (permanently
-    %% diverged data).  Production boot MUST therefore be ordered: bring up one
-    %% seed node and wait for its Mnesia to be healthy before starting the
-    %% rest.  Automatic seed election / quorum is a later (Phase 2) task.
-    Others = [N || N <- chf_cluster:cluster_nodes(),
-                   N =/= node(),
-                   pong =:= net_adm:ping(N)],
-    %% Mnesia schema must be created before mnesia:start().
-    %% Stop mnesia if it is running, then:
-    %%   * No reachable peers → create a single-node schema (seed node).
-    %%   * Reachable peers   → skip local schema creation; we will merge via
-    %%                         change_config(extra_db_nodes, …) after start.
-    _ = application:stop(mnesia),
-    case Others of
-        [] ->
-            case mnesia:create_schema([node()]) of
-                ok                            -> ok;
-                {error, {_, {already_exists, _}}} -> ok;
-                {error, SchemaErr}            -> error({schema, SchemaErr})
-            end;
-        _ ->
-            ok
-    end,
-    ok = application:ensure_started(mnesia),
-    %% If we found peers, merge their schema into this node and switch the
-    %% local schema copy to disc so that table definitions survive restarts.
-    case Others of
-        [] -> ok;
-        _  ->
-            {ok, _MergedFrom} = mnesia:change_config(extra_db_nodes, Others),
-            %% Make the local schema disc-resident.  On a fresh join this is a
-            %% ram→disc conversion ({atomic, ok}); on restart with a pre-existing
-            %% disc schema it is already disc_copies ({aborted, already_exists}).
-            %% Anything else (e.g. disc full, permission denied) is a real fault
-            %% that must not be swallowed — fail loudly so we never build tables
-            %% on top of an inconsistent schema.
-            case mnesia:change_table_copy_type(schema, node(), disc_copies) of
-                {atomic, ok}                                       -> ok;
-                {aborted, {already_exists, schema, _, disc_copies}} -> ok;
-                {aborted, TypeErr} -> error({schema_copy_type, TypeErr})
-            end
-    end,
-    ok = ensure_table(subscriber, record_info(fields, subscriber),
-                      [{index, [#subscriber.msisdn]}]),
-    ok = ensure_table(balance,    record_info(fields, balance),    []),
-    ok = ensure_table(cdr,        record_info(fields, cdr),        []),
-    ok = ensure_table(charging_session, record_info(fields, charging_session), []),
-    ok = mnesia:wait_for_tables([subscriber, balance, cdr, charging_session], 30000).
+    {ok, #{}}.
+
+-spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
+handle_call(_Req, _From, St) ->
+    {reply, {error, unexpected_call}, St}.
+
+-spec handle_cast(term(), map()) -> {noreply, map()}.
+handle_cast(_Msg, St) ->
+    {noreply, St}.
+
+-spec handle_info(term(), map()) -> {noreply, map()}.
+handle_info(_Info, St) ->
+    {noreply, St}.
+
+-spec terminate(term(), map()) -> ok.
+terminate(_Reason, _St) ->
+    ok.
 
 %%--------------------------------------------------------------------
-%% Internal helper — create table on first node or add local disc_copies
-%% replica when the table was already created by another cluster member.
+%% ensure_collection
 %%--------------------------------------------------------------------
--spec ensure_table(atom(), [atom()], list()) -> ok.
-ensure_table(Name, Fields, ExtraOpts) ->
-    BaseOpts = [{attributes, Fields}, {disc_copies, [node()]} | ExtraOpts],
-    case mnesia:create_table(Name, BaseOpts) of
-        {atomic, ok} ->
+
+-doc "Create the Mnesia table for `Coll` with declared indexes. Idempotent.\n"
+     "\n"
+     "DISC-SCHEMA-AT-BOOT: when `storage` is `disc_copies` or `disc_only_copies`,\n"
+     "this function ensures the on-disc Mnesia schema exists before creating the\n"
+     "table. Sequence: stop mnesia → create_schema (tolerating already_exists) →\n"
+     "ensure mnesia started → create table. Gated to disc-based storage only;\n"
+     "`ram_copies` must NOT create an on-disk schema.".
+-spec ensure_collection(chf_db_backend:collection(), chf_db_backend:coll_opts()) ->
+    ok | {error, term()}.
+ensure_collection(Coll, Opts) ->
+    BinIdx  = maps:get(indexes, Opts, []),
+    Storage = maps:get(storage, Opts, disc_copies),
+    %% DISC-SCHEMA-AT-BOOT: bootstrap disc schema before creating a disc table.
+    ok = maybe_ensure_disc_schema(Storage),
+    %% Mnesia attributes must be atoms; convert binary index names.
+    AtomIdx = [binary_to_atom(B) || B <- BinIdx],
+    Attrs   = [key | AtomIdx] ++ [version, doc],
+    case mnesia:create_table(Coll, [{attributes, Attrs},
+                                    {Storage, [node()]},
+                                    {index, AtomIdx},
+                                    {type, set}]) of
+        {atomic, ok}                   ->
+            store_meta(Coll, BinIdx, AtomIdx),
             ok;
-        {aborted, {already_exists, Name}} ->
-            %% Table exists (created by another node).  Add this node as a
-            %% disc_copies replica so transactions are distributed here too.
-            case mnesia:add_table_copy(Name, node(), disc_copies) of
-                {atomic, ok}                         -> ok;
-                {aborted, {already_exists, Name, _}} -> ok;
-                {aborted, AddErr}                    -> error({add_table_copy, Name, AddErr})
-            end;
-        {aborted, Reason} ->
-            error({create_table_failed, Name, Reason})
+        {aborted, {already_exists, _}} ->
+            store_meta(Coll, BinIdx, AtomIdx),
+            ok;
+        {aborted, Reason}              ->
+            {error, {create_table_failed, Coll, Reason}}
     end.
 
-%%====================================================================
-%% Subscriber CRUD
-%%====================================================================
-
--spec subscriber_create(#subscriber{}) -> ok | {error, term()}.
-subscriber_create(#subscriber{imsi = Imsi} = Sub) ->
-    F = fun() ->
-        case mnesia:read(subscriber, Imsi, write) of
-            [_] -> mnesia:abort(already_exists);
-            []  -> mnesia:write(Sub)
-        end
+%% Ensure the on-disc Mnesia schema exists when using disc-based storage.
+%% Gated: ram_copies must NOT write a disc schema (would break CI/test runs).
+-spec maybe_ensure_disc_schema(atom()) -> ok.
+maybe_ensure_disc_schema(ram_copies) ->
+    ok;
+maybe_ensure_disc_schema(_DiscStorage) ->
+    %% Stop Mnesia first so schema creation can proceed cleanly.
+    application:stop(mnesia),
+    case mnesia:create_schema([node()]) of
+        ok                              -> ok;
+        {error, {_, {already_exists, _}}} -> ok
     end,
-    case activity(F) of
-        ok               -> ok;
-        {error, _} = Err -> Err
+    ok = application:ensure_started(mnesia).
+
+%%--------------------------------------------------------------------
+%% get / put / cas_put / delete / take
+%%--------------------------------------------------------------------
+
+-doc "Dirty (lock-free) read. Returns `{ok, Doc, Version}` or `{error, not_found}`.".
+-spec get(chf_db_backend:collection(), chf_db_backend:key()) ->
+    {ok, chf_db_backend:doc(), chf_db_backend:version()} | {error, not_found}.
+get(Coll, Key) ->
+    case mnesia:dirty_read(Coll, Key) of
+        [Row] -> {ok, row_doc(Coll, Row), row_version(Coll, Row)};
+        []    -> {error, not_found}
     end.
 
--spec subscriber_lookup(Imsi :: binary()) -> {ok, #subscriber{}} | {error, not_found}.
-subscriber_lookup(Imsi) ->
-    case activity(fun() -> mnesia:read(subscriber, Imsi) end) of
-        [#subscriber{} = Sub] -> {ok, Sub};
-        []                    -> {error, not_found};
-        {error, _} = Err      -> Err
-    end.
-
--spec subscriber_update(#subscriber{}) -> ok | {error, term()}.
-subscriber_update(#subscriber{} = Sub) ->
-    case activity(fun() -> mnesia:write(Sub) end) of
-        ok               -> ok;
-        {error, _} = Err -> Err
-    end.
-
--spec subscriber_delete(Imsi :: binary()) -> ok | {error, term()}.
-subscriber_delete(Imsi) ->
-    case activity(fun() -> mnesia:delete({subscriber, Imsi}) end) of
-        ok               -> ok;
-        {error, _} = Err -> Err
-    end.
-
-%%====================================================================
-%% Balance operations
-%%====================================================================
-
--spec balance_get(AccountId :: binary()) -> {ok, #balance{}} | {error, not_found}.
-balance_get(AccountId) ->
-    case activity(fun() -> mnesia:read(balance, AccountId) end) of
-        [#balance{} = B] -> {ok, B};
-        []               -> {error, not_found};
-        {error, _} = Err -> Err
-    end.
-
--spec balance_topup(AccountId :: binary(), Amount :: integer()) ->
-    {ok, #balance{}} | {error, term()}.
-%% A negative top-up would silently destroy balance (reduce total/available with
-%% no compensating operation). Reject it. Zero is allowed: subscriber creation
-%% calls balance_topup(_, 0) to materialise an empty balance row.
-balance_topup(_AccountId, Amount) when Amount < 0 ->
-    {error, invalid_amount};
-balance_topup(AccountId, Amount) ->
+-doc "Unconditional upsert in a transaction. Bumps version by 1; sets to 1 for new keys.\n"
+     "Infrastructure failures return `{error, Reason}` (database.md §6.1).".
+-spec put(chf_db_backend:collection(), chf_db_backend:key(), chf_db_backend:doc()) ->
+    {ok, chf_db_backend:version()} | {error, term()}.
+put(Coll, Key, Doc) ->
     F = fun() ->
-        B0 = case mnesia:read(balance, AccountId, write) of
-            [Existing] -> Existing;
-            []         -> #balance{account_id = AccountId,
-                                   total = 0, reserved = 0, available = 0}
+        NewVsn = case mnesia:read(Coll, Key, write) of
+            [Row] -> row_version(Coll, Row) + 1;
+            []    -> 1
         end,
-        NewTotal = B0#balance.total + Amount,
-        B1 = B0#balance{total     = NewTotal,
-                        available = NewTotal - B0#balance.reserved},
-        ok = mnesia:write(B1),
-        B1
+        ok = mnesia:write(make_row(Coll, Key, NewVsn, Doc)),
+        NewVsn
     end,
-    run_balance_txn(F).
+    case mnesia:transaction(F) of
+        {atomic, V}  -> {ok, V};
+        {aborted, R} -> {error, R}
+    end.
 
--spec balance_reserve(AccountId :: binary(), Amount :: integer()) ->
-    {ok, #balance{}} | {error, term()}.
-%% A negative reservation would pass the `Avail < Amount` check and *decrease*
-%% reserved (a stealth refund that raises available). Reject it.
-balance_reserve(_AccountId, Amount) when Amount < 0 ->
-    {error, invalid_amount};
-balance_reserve(AccountId, Amount) ->
+-doc "CAS write: succeeds iff stored version == ExpVsn. Returns new version on success.".
+-spec cas_put(chf_db_backend:collection(), chf_db_backend:key(),
+              chf_db_backend:version(), chf_db_backend:doc()) ->
+    {ok, chf_db_backend:version()} | {error, version_conflict} | {error, not_found}.
+cas_put(Coll, Key, ExpVsn, Doc) ->
     F = fun() ->
-        case mnesia:read(balance, AccountId, write) of
+        case mnesia:read(Coll, Key, write) of
+            [Row] ->
+                case row_version(Coll, Row) of
+                    ExpVsn ->
+                        NewVsn = ExpVsn + 1,
+                        ok = mnesia:write(make_row(Coll, Key, NewVsn, Doc)),
+                        {ok, NewVsn};
+                    _ ->
+                        {error, version_conflict}
+                end;
             [] ->
-                mnesia:abort(not_found);
-            [#balance{available = Avail}] when Avail < Amount ->
-                mnesia:abort(insufficient_balance);
-            [#balance{} = B0] ->
-                NewReserved = B0#balance.reserved + Amount,
-                B1 = B0#balance{reserved  = NewReserved,
-                                available = B0#balance.total - NewReserved},
-                ok = mnesia:write(B1),
-                B1
+                {error, not_found}
         end
     end,
-    run_balance_txn(F).
-
--spec balance_reserve_up_to(AccountId :: binary(), Amount :: integer()) ->
-    {ok, non_neg_integer(), #balance{}} | {error, term()}.
-%% A negative amount is invalid — reject it immediately.
-balance_reserve_up_to(_AccountId, Amount) when Amount < 0 ->
-    {error, invalid_amount};
-balance_reserve_up_to(AccountId, Amount) ->
-    activity_result(fun() -> reserve_up_to_core(AccountId, Amount) end).
-
--spec balance_reserve_up_to(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
-    {ok, non_neg_integer(), #balance{}} | {error, term()}.
-%% Ctx-aware variant: runs the core logic directly inside the caller's activity.
-%% Returns {error, not_found} as a value (no abort) so the enclosing transaction
-%% is NOT aborted on a missing account.
-balance_reserve_up_to(_Ctx, _AccountId, Amount) when Amount < 0 ->
-    {error, invalid_amount};
-balance_reserve_up_to(mnesia, AccountId, Amount) ->
-    reserve_up_to_core(AccountId, Amount).
-
-%% Shared value-returning core — MUST NOT call mnesia:abort/1.
--spec reserve_up_to_core(binary(), integer()) ->
-    {ok, non_neg_integer(), #balance{}} | {error, not_found}.
-reserve_up_to_core(AccountId, Amount) ->
-    case mnesia:read(balance, AccountId, write) of
-        [] ->
-            {error, not_found};
-        [#balance{available = Avail} = B0] ->
-            Granted     = min(Amount, max(0, Avail)),
-            NewReserved = B0#balance.reserved + Granted,
-            B1 = B0#balance{reserved  = NewReserved,
-                            available = B0#balance.total - NewReserved},
-            ok = mnesia:write(B1),
-            {ok, Granted, B1}
+    case mnesia:transaction(F) of
+        {atomic, Result} -> Result;
+        {aborted, R}     -> {error, {aborted, R}}
     end.
 
--spec balance_commit(AccountId :: binary(), Amount :: integer()) ->
-    {ok, #balance{}} | {error, term()}.
-balance_commit(AccountId, Amount) ->
-    activity_result(fun() -> commit_core(AccountId, Amount) end).
+-doc "Idempotent delete (dirty).".
+-spec delete(chf_db_backend:collection(), chf_db_backend:key()) -> ok.
+delete(Coll, Key) ->
+    mnesia:dirty_delete(Coll, Key).
 
--spec balance_commit(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
-    {ok, #balance{}} | {error, term()}.
-%% Ctx-aware variant: runs commit_core directly inside the caller's activity.
-%% Returns {error, not_found} as a value (no abort).
-balance_commit(mnesia, AccountId, Amount) ->
-    commit_core(AccountId, Amount).
-
-%% Shared value-returning core — MUST NOT call mnesia:abort/1.
--spec commit_core(binary(), integer()) -> {ok, #balance{}} | {error, not_found}.
-commit_core(AccountId, Amount) ->
-    case mnesia:read(balance, AccountId, write) of
-        [] ->
-            {error, not_found};
-        [#balance{} = B0] ->
-            %% Never commit more than is reserved.
-            Commit      = min(max(0, Amount), B0#balance.reserved),
-            NewReserved = B0#balance.reserved - Commit,
-            NewTotal    = B0#balance.total    - Commit,
-            B1 = B0#balance{total     = NewTotal,
-                            reserved  = NewReserved,
-                            available = NewTotal - NewReserved},
-            ok = mnesia:write(B1),
-            {ok, B1}
-    end.
-
--spec balance_refund(AccountId :: binary(), Amount :: integer()) ->
-    {ok, #balance{}} | {error, term()}.
-balance_refund(AccountId, Amount) ->
-    activity_result(fun() -> refund_core(AccountId, Amount) end).
-
--spec balance_refund(Ctx :: term(), AccountId :: binary(), Amount :: integer()) ->
-    {ok, #balance{}} | {error, term()}.
-%% Ctx-aware variant: runs refund_core directly inside the caller's activity.
-%% Returns {error, not_found} as a value (no abort).
-balance_refund(mnesia, AccountId, Amount) ->
-    refund_core(AccountId, Amount).
-
-%% Shared value-returning core — MUST NOT call mnesia:abort/1.
--spec refund_core(binary(), integer()) -> {ok, #balance{}} | {error, not_found}.
-refund_core(AccountId, Amount) ->
-    case mnesia:read(balance, AccountId, write) of
-        [] ->
-            {error, not_found};
-        [#balance{} = B0] ->
-            %% Never refund more than is reserved.
-            Refund      = min(max(0, Amount), B0#balance.reserved),
-            NewReserved = B0#balance.reserved - Refund,
-            B1 = B0#balance{reserved  = NewReserved,
-                            available = B0#balance.total - NewReserved},
-            ok = mnesia:write(B1),
-            {ok, B1}
-    end.
-
--spec balance_set_total(AccountId :: binary(), NewTotal :: integer()) ->
-    {ok, #balance{}} | {error, term()}.
-balance_set_total(AccountId, NewTotal) ->
+-doc "Atomic read-and-delete in a transaction.".
+-spec take(chf_db_backend:collection(), chf_db_backend:key()) ->
+    {ok, chf_db_backend:doc(), chf_db_backend:version()} | {error, not_found}.
+take(Coll, Key) ->
     F = fun() ->
-        Reserved = case mnesia:read(balance, AccountId, write) of
-            [#balance{reserved = R}] -> R;
-            []                       -> 0
-        end,
-        case NewTotal < Reserved of
-            true ->
-                mnesia:abort(total_below_reserved);
-            false ->
-                B1 = #balance{account_id = AccountId,
-                              total      = NewTotal,
-                              reserved   = Reserved,
-                              available  = NewTotal - Reserved},
-                ok = mnesia:write(B1),
-                B1
+        case mnesia:read(Coll, Key, write) of
+            [Row] ->
+                ok = mnesia:delete(Coll, Key, write),
+                {ok, row_doc(Coll, Row), row_version(Coll, Row)};
+            [] ->
+                {error, not_found}
         end
     end,
-    run_balance_txn(F).
+    case mnesia:transaction(F) of
+        {atomic, Result} -> Result;
+        {aborted, R}     -> {error, {aborted, R}}
+    end.
 
 %%--------------------------------------------------------------------
-%% Internal — run a balance transaction, normalising the result.
+%% find / find_by / fold / count
 %%--------------------------------------------------------------------
--spec run_balance_txn(fun()) -> {ok, #balance{}} | {error, term()}.
-run_balance_txn(F) ->
-    case activity(F) of
-        #balance{} = B   -> {ok, B};
-        {error, _} = Err -> Err
+
+-doc "Dirty table scan filtered by selector equality.".
+-spec find(chf_db_backend:collection(), chf_db_backend:selector()) ->
+    {ok, [chf_db_backend:doc()]}.
+find(Coll, Selector) ->
+    Pattern = mnesia:table_info(Coll, wild_pattern),
+    Rows    = mnesia:dirty_match_object(Coll, Pattern),
+    Docs    = [Doc || Row <- Rows,
+               Doc <- [row_doc(Coll, Row)],
+               selector_matches(Selector, Doc)],
+    {ok, Docs}.
+
+-doc "Guaranteed indexed read via `mnesia:dirty_index_read`. Returns `{error, undeclared_index}`\n"
+     "if the index was not declared in `ensure_collection`.".
+-spec find_by(chf_db_backend:collection(), chf_db_backend:index(), term()) ->
+    {ok, [chf_db_backend:doc()]} | {error, undeclared_index}.
+find_by(Coll, BinIndex, Value) ->
+    {BinIdxs, AtomIdxs} = get_meta(Coll),
+    case find_atom_idx(BinIndex, BinIdxs, AtomIdxs) of
+        {ok, AtomIdx} ->
+            Rows = mnesia:dirty_index_read(Coll, Value, AtomIdx),
+            {ok, [row_doc(Coll, Row) || Row <- Rows]};
+        error ->
+            {error, undeclared_index}
     end.
 
-%% Run Fun inside a new Mnesia activity, converting an abort exit into
-%% {error, Reason}. Used by /2 variants of balance ops whose core funs
-%% return values (not raw records), so the result passes through as-is.
--spec activity_result(fun()) -> term() | {error, term()}.
-activity_result(F) ->
-    try mnesia:activity(transaction, F)
-    catch
-        exit:{aborted, {chf_session_abort, Reason}} -> {error, Reason};
-        exit:{aborted, Reason}                      -> {error, Reason}
-    end.
-
-%% Run a Mnesia activity, converting an abort exit into {error, Reason}.
-%% mnesia:activity/2 returns the fun's value on success and EXITS with
-%% {aborted, Reason} on abort, so callers must catch the exit here.
--spec activity(fun()) -> term() | {error, term()}.
-activity(F) ->
-    try mnesia:activity(transaction, F)
-    catch
-        exit:{aborted, {chf_session_abort, Reason}} -> {error, Reason};
-        exit:{aborted, Reason}                      -> {error, Reason}
-    end.
-
-%%====================================================================
-%% CDR operations
-%%====================================================================
-
--spec cdr_write(#cdr{}) -> ok | {error, term()}.
-cdr_write(#cdr{} = Cdr) ->
-    case activity(fun() -> mnesia:write(Cdr) end) of
-        ok               -> ok;
-        {error, _} = Err -> Err
-    end.
-
--spec cdr_write(Ctx :: term(), #cdr{}) -> ok.
-%% Ctx-aware variant: writes the CDR directly inside the caller's activity.
-cdr_write(mnesia, #cdr{} = Cdr) ->
-    mnesia:write(Cdr).
-
--spec cdr_list(Filters :: map()) -> {ok, [#cdr{}]} | {error, term()}.
-cdr_list(Filters) ->
-    %% Build a match-spec pattern from the Filters map.
-    %% Supported filter keys: session_id, imsi, type, rating_group.
-    Pattern = #cdr{
-        id           = maps:get(id,           Filters, '_'),
-        session_id   = maps:get(session_id,   Filters, '_'),
-        imsi         = maps:get(imsi,         Filters, '_'),
-        type         = maps:get(type,         Filters, '_'),
-        rating_group = maps:get(rating_group, Filters, '_'),
-        used_units   = '_',
-        timestamp    = '_',
-        metadata     = '_'
-    },
-    case activity(fun() -> mnesia:match_object(Pattern) end) of
-        Cdrs when is_list(Cdrs) -> {ok, Cdrs};
-        {error, _} = Err        -> Err
-    end.
-
-%%====================================================================
-%% Session persistence
-%%====================================================================
-
--spec session_store(#charging_session{}) -> ok | {error, term()}.
-session_store(#charging_session{} = Session) ->
-    case activity(fun() -> mnesia:write(Session) end) of
-        ok               -> ok;
-        {error, _} = Err -> Err
-    end.
-
--spec session_lookup(SessionId :: binary()) ->
-    {ok, #charging_session{}} | {error, not_found}.
-session_lookup(SessionId) ->
-    case activity(fun() -> mnesia:read(charging_session, SessionId) end) of
-        [#charging_session{} = S] -> {ok, S};
-        []                        -> {error, not_found};
-        {error, _} = Err          -> Err
-    end.
-
--spec session_delete(SessionId :: binary()) -> ok | {error, term()}.
-session_delete(SessionId) ->
-    case activity(fun() -> mnesia:delete({charging_session, SessionId}) end) of
-        ok               -> ok;
-        {error, _} = Err -> Err
-    end.
-
--spec session_list_active() -> {ok, [#charging_session{}]} | {error, term()}.
-session_list_active() ->
-    Pattern = #charging_session{state = active, _ = '_'},
-    case activity(fun() -> mnesia:match_object(Pattern) end) of
-        L when is_list(L)  -> {ok, L};
-        {error, _} = Err   -> Err
-    end.
-
--spec session_transaction(SessionId :: binary(), Fun :: fun()) ->
-    term() | {error, term()}.
-session_transaction(SessionId, Fun) ->
+-doc "Streaming async-dirty fold over all matching documents.".
+-spec fold(chf_db_backend:collection(), chf_db_backend:selector(),
+           fun((chf_db_backend:doc(), Acc) -> Acc), Acc) -> {ok, Acc}.
+fold(Coll, Selector, Fun, Acc0) ->
     F = fun() ->
-        Current = case mnesia:read(charging_session, SessionId, write) of
-            [#charging_session{} = S] -> S;
-            []                        -> undefined
-        end,
-        case Fun(mnesia, Current) of
-            {commit, #charging_session{} = New, Result} ->
-                ok = mnesia:write(New),
-                Result;
-            {result, Result} ->
-                Result;
-            {abort, Reason} ->
-                mnesia:abort({chf_session_abort, Reason})
-        end
+        mnesia:foldl(
+            fun(Row, Acc) ->
+                Doc = row_doc(Coll, Row),
+                case selector_matches(Selector, Doc) of
+                    true  -> Fun(Doc, Acc);
+                    false -> Acc
+                end
+            end,
+            Acc0, Coll)
     end,
-    activity(F).
+    {ok, mnesia:activity(async_dirty, F)}.
+
+-doc "Count of documents matching selector.".
+-spec count(chf_db_backend:collection(), chf_db_backend:selector()) ->
+    {ok, non_neg_integer()}.
+count(Coll, Selector) ->
+    {ok, Docs} = find(Coll, Selector),
+    {ok, length(Docs)}.
+
+%%--------------------------------------------------------------------
+%% Private helpers
+%%--------------------------------------------------------------------
+
+%% Store binary-to-atom index mapping for a collection in persistent_term.
+%% persistent_term is safe to read from any process including Mnesia txn workers.
+-spec store_meta(atom(), [binary()], [atom()]) -> ok.
+store_meta(Coll, BinIdx, AtomIdx) ->
+    persistent_term:put({?MODULE, Coll, idx}, {BinIdx, AtomIdx}).
+
+%% Retrieve the index mapping for a collection.
+%% Returns {BinIdxs, AtomIdxs}. Defaults to empty lists if not found.
+-spec get_meta(atom()) -> {[binary()], [atom()]}.
+get_meta(Coll) ->
+    persistent_term:get({?MODULE, Coll, idx}, {[], []}).
+
+%% Resolve a binary index name to its corresponding atom attribute name.
+-spec find_atom_idx(binary(), [binary()], [atom()]) -> {ok, atom()} | error.
+find_atom_idx(_, [], []) ->
+    error;
+find_atom_idx(BinIdx, [BinIdx | _], [AtomIdx | _]) ->
+    {ok, AtomIdx};
+find_atom_idx(BinIdx, [_ | BinRest], [_ | AtomRest]) ->
+    find_atom_idx(BinIdx, BinRest, AtomRest).
+
+%% Build a Mnesia row tuple.
+%% Tuple layout: {Coll, Key, AtomIdxVal1, ..., Version, Doc}
+%% where AtomIdx fields are in the order declared in ensure_collection.
+-spec make_row(atom(), binary(), non_neg_integer(), map()) -> tuple().
+make_row(Coll, Key, Version, Doc) ->
+    {BinIdx, _AtomIdx} = get_meta(Coll),
+    IdxVals = [maps:get(F, Doc, undefined) || F <- BinIdx],
+    list_to_tuple([Coll, Key | IdxVals] ++ [Version, Doc]).
+
+%% Extract version from a Mnesia row tuple.
+%% Layout: {Coll, Key, Idx1, ..., IdxN, Version, Doc}
+%% Version is at position 3 + length(BinIdx) (1-based).
+-spec row_version(atom(), tuple()) -> non_neg_integer().
+row_version(Coll, Row) ->
+    {BinIdx, _} = get_meta(Coll),
+    element(3 + length(BinIdx), Row).
+
+%% Extract doc map from a Mnesia row tuple.
+%% Doc is at position 4 + length(BinIdx) (1-based).
+-spec row_doc(atom(), tuple()) -> map().
+row_doc(Coll, Row) ->
+    {BinIdx, _} = get_meta(Coll),
+    element(4 + length(BinIdx), Row).
+
+%% Equality-match selector against a doc map.
+-spec selector_matches(map(), map()) -> boolean().
+selector_matches(Selector, Doc) ->
+    maps:fold(
+        fun(K, V, Acc) -> Acc andalso maps:get(K, Doc, '$nomatch') =:= V end,
+        true, Selector).

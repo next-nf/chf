@@ -22,7 +22,6 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
--include_lib("chf_db/include/chf_db.hrl").
 
 %%====================================================================
 %% CT callbacks
@@ -97,52 +96,46 @@ end_per_testcase(_TC, Config) ->
 
 setup_mnesia() ->
     application:set_env(chf_db, backend, chf_db_mnesia),
-    persistent_term:erase({chf_db, backend}),
+    application:set_env(chf_db, backend_opts, #{storage => ram_copies}),
+    persistent_term:put({chf_db, backend}, chf_db_mnesia),
+    catch gen_server:stop(chf_db_mnesia),
     mnesia:stop(),
     ok = mnesia:start(),
-    {atomic, ok} = mnesia:create_table(subscriber,
-        [{attributes, record_info(fields, subscriber)}, {index, [#subscriber.msisdn]}]),
-    {atomic, ok} = mnesia:create_table(balance,
-        [{attributes, record_info(fields, balance)}]),
-    {atomic, ok} = mnesia:create_table(cdr,
-        [{attributes, record_info(fields, cdr)}]),
-    {atomic, ok} = mnesia:create_table(charging_session,
-        [{attributes, record_info(fields, charging_session)}]),
+    {ok, _Pid} = chf_db_mnesia:start_link(#{}),
+    ok = chf_data:ensure_collections(),
+    ok = chf_db_mnesia:wait_ready([subscriber, balance, charging_session, cdr]),
     ok.
 
 seed_subscriber(Imsi, AccountId) ->
-    Sub = #subscriber{imsi = Imsi, msisdn = <<"49", Imsi/binary>>,
-                      account_id = AccountId, status = active,
-                      rating_groups = #{}, created_at = 0, updated_at = 0},
-    ok = chf_db:subscriber_create(Sub),
-    {ok, _} = chf_db:balance_topup(AccountId, 5000),
+    Sub = #{<<"imsi">> => Imsi, <<"msisdn">> => <<"49", Imsi/binary>>,
+            <<"account_id">> => AccountId, <<"status">> => <<"active">>,
+            <<"rating_groups">> => #{}, <<"created_at">> => 0, <<"updated_at">> => 0},
+    ok = chf_data:subscriber_create(Sub),
+    {ok, _} = chf_data:balance_topup(AccountId, 5000),
     ok.
 
 seed_session(SessionId, Imsi) ->
-    Sess = #charging_session{
-        session_id    = SessionId,
-        imsi          = Imsi,
-        type          = online,
-        state         = active,
-        granted_units = #{1 => 1000},
-        used_units    = #{1 => 100},
-        created_at    = 0,
-        updated_at    = 0
-    },
-    mnesia:dirty_write(Sess).
+    %% Descriptive session map. granted_units/used_units/type are extra reporting
+    %% fields preserved by chf_session:to_doc.
+    Sess = #{<<"session_id">>    => SessionId,
+             <<"imsi">>          => Imsi,
+             <<"type">>          => <<"online">>,
+             <<"state">>         => <<"active">>,
+             <<"granted_units">> => #{1 => 1000},
+             <<"used_units">>    => #{1 => 100},
+             <<"created_at">>    => 0,
+             <<"updated_at">>    => 0},
+    chf_data:session_store(Sess).
 
 seed_cdr(Id, SessionId, Imsi) ->
-    Cdr = #cdr{
-        id           = Id,
-        session_id   = SessionId,
-        imsi         = Imsi,
-        type         = offline,
-        rating_group = 1,
-        used_units   = #{total => 500},
-        timestamp    = 0,
-        metadata     = #{}
-    },
-    mnesia:dirty_write(Cdr).
+    Cdr = #{<<"cdr_id">>       => Id,
+            <<"session_id">>   => SessionId,
+            <<"imsi">>         => Imsi,
+            <<"rating_group">> => <<"1">>,
+            <<"used">>         => 500,
+            <<"ts">>           => 0,
+            <<"metadata">>     => #{}},
+    chf_data:cdr_create(Cdr).
 
 %%====================================================================
 %% HTTP helpers

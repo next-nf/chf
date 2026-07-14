@@ -21,8 +21,6 @@
 %%   imsi, session_id, type, limit (default 100)
 -module(chf_web_cdr_h).
 
--include_lib("chf_db/include/chf_db.hrl").
-
 -export([init/2]).
 
 init(Req0, State) ->
@@ -33,36 +31,28 @@ init(Req0, State) ->
 
 handle_get(Req0, State) ->
     QS      = cowboy_req:parse_qs(Req0),
-    Filters = build_filters(QS),
+    Selector = build_selector(QS),
     Limit   = get_limit(QS, 100),
-    case chf_db:cdr_list(Filters) of
-        {ok, Cdrs} ->
-            Trimmed = lists:sublist(Cdrs, Limit),
-            reply(200, [cdr_to_map(C) || C <- Trimmed], Req0, State);
-        {error, Reason} ->
-            reply(500, #{<<"error">> => iolist_to_binary(io_lib:format("~p", [Reason]))},
-                  Req0, State)
-    end.
+    {ok, Docs} = chf_db:find(cdr, Selector),
+    Cdrs = [chf_cdr:from_doc(D) || D <- Docs],
+    Trimmed = lists:sublist(Cdrs, Limit),
+    reply(200, [cdr_to_map(C) || C <- Trimmed], Req0, State).
 
 %%====================================================================
 %% Helpers
 %%====================================================================
 
-build_filters(QS) ->
-    F0 = #{},
+%% Build a binary-keyed field-equality selector for chf_db:find/2 from the query
+%% string. Only fields present on the CDR document are filtered (imsi,
+%% session_id); the retired `type` field no longer exists.
+build_selector(QS) ->
     F1 = case lists:keyfind(<<"imsi">>, 1, QS) of
-             {_, V} -> F0#{imsi => V};
-             false  -> F0
+             {_, V} -> #{<<"imsi">> => V};
+             false  -> #{}
          end,
-    F2 = case lists:keyfind(<<"session_id">>, 1, QS) of
-             {_, V2} -> F1#{session_id => V2};
-             false   -> F1
-         end,
-    case lists:keyfind(<<"type">>, 1, QS) of
-        {_, <<"online">>}    -> F2#{type => online};
-        {_, <<"offline">>}   -> F2#{type => offline};
-        {_, <<"converged">>} -> F2#{type => converged};
-        _                    -> F2
+    case lists:keyfind(<<"session_id">>, 1, QS) of
+        {_, V2} -> F1#{<<"session_id">> => V2};
+        false   -> F1
     end.
 
 get_limit(QS, Default) ->
@@ -75,33 +65,16 @@ get_limit(QS, Default) ->
         false -> Default
     end.
 
-cdr_to_map(#cdr{
-        id           = Id,
-        session_id   = SessionId,
-        imsi         = Imsi,
-        type         = Type,
-        rating_group = RG,
-        used_units   = Used,
-        timestamp    = Ts,
-        metadata     = Meta}) ->
+cdr_to_map(Cdr) ->
     #{
-        <<"id">>           => Id,
-        <<"session_id">>   => SessionId,
-        <<"imsi">>         => Imsi,
-        <<"type">>         => atom_to_binary(Type, utf8),
-        <<"rating_group">> => RG,
-        <<"used_units">>   => used_units_to_map(Used),
-        <<"timestamp">>    => Ts,
-        <<"metadata">>     => meta_to_map(Meta)
+        <<"id">>           => maps:get(<<"cdr_id">>, Cdr, <<>>),
+        <<"session_id">>   => maps:get(<<"session_id">>, Cdr, <<>>),
+        <<"imsi">>         => maps:get(<<"imsi">>, Cdr, <<>>),
+        <<"rating_group">> => maps:get(<<"rating_group">>, Cdr, <<>>),
+        <<"used">>         => maps:get(<<"used">>, Cdr, 0),
+        <<"timestamp">>    => maps:get(<<"ts">>, Cdr, 0),
+        <<"metadata">>     => meta_to_map(maps:get(<<"metadata">>, Cdr, #{}))
     }.
-
-used_units_to_map(Used) when is_map(Used) ->
-    maps:fold(fun(K, V, A) ->
-        Key = if is_atom(K) -> atom_to_binary(K, utf8);
-                 true       -> K
-              end,
-        A#{Key => V}
-    end, #{}, Used).
 
 meta_to_map(Meta) when is_map(Meta) ->
     maps:fold(fun(K, V, A) ->

@@ -18,7 +18,11 @@
 {application, chf_db, [
     {vsn, semver},
     {description, "Next-CHF Database Layer"},
-    {applications, [kernel, stdlib]},
+    {applications, [kernel, stdlib, mnesia]},
     {mod, {chf_db_app, []}},
-    {registered, []}
+    {registered, []},
+    {env, [
+        {backend,      chf_db_mnesia},
+        {backend_opts, #{storage => disc_copies}}
+    ]}
 ]}.
