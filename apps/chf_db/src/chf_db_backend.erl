@@ -33,7 +33,7 @@
 -callback child_spec(Opts :: map()) -> supervisor:child_spec().
 
 -doc "Create the collection and declare indexes, idempotent.".
--callback ensure_collection(collection(), coll_opts()) -> ok.
+-callback ensure_collection(collection(), coll_opts()) -> ok | {error, term()}.
 
 -doc "Fetch a document. May use a dirty/lock-free read (P7).".
 -callback get(collection(), key()) -> {ok, doc(), version()} | {error, not_found}.

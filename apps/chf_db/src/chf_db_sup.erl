@@ -16,37 +16,18 @@
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 -module(chf_db_sup).
+-moduledoc "Top supervisor for `chf_db`; starts the configured backend's owning process.".
 -behaviour(supervisor).
 
--export([start_link/0]).
--export([init/1]).
+-export([start_link/0, init/1]).
 
+-spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+-spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
-    SupFlags = #{
-        strategy  => one_for_one,
-        intensity => 5,
-        period    => 10
-    },
-    MongoChild = case application:get_env(chf_db, backend, chf_db_mnesia) of
-        chf_db_mongo ->
-            [#{id       => chf_db_mongo_conn,
-               start    => {chf_db_mongo_conn, start_link, []},
-               restart  => permanent,
-               shutdown => 5000,
-               type     => worker,
-               modules  => [chf_db_mongo_conn]}];
-        _ ->
-            []
-    end,
-    Children = MongoChild ++ [
-        #{id       => chf_cluster,
-          start    => {chf_cluster, start_link, []},
-          restart  => permanent,
-          shutdown => 5000,
-          type     => worker,
-          modules  => [chf_cluster]}
-    ],
-    {ok, {SupFlags, Children}}.
+    Backend  = chf_db:backend(),
+    Opts     = application:get_env(chf_db, backend_opts, #{}),
+    SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
+    {ok, {SupFlags, [Backend:child_spec(Opts)]}}.

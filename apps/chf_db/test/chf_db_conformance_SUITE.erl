@@ -25,7 +25,11 @@
          init_per_suite/1, end_per_suite/1,
          init_per_group/2, end_per_group/2,
          init_per_testcase/2, end_per_testcase/2]).
--export([run_conformance/1]).
+-export([run_conformance/1,
+         facade_update_abort/1,
+         facade_update_retry/1,
+         facade_create/1,
+         facade_ready/1]).
 
 %% Collection atoms used per group — different names avoid cross-group interference.
 -define(RAM_COLL,      conf_chf_ram).
@@ -34,12 +38,16 @@
 -define(DISC_IDX_COLL, conf_chf_disc_idx).
 
 all() ->
-    [{group, ram}, {group, disc}].
+    [{group, ram}, {group, disc}, {group, facade}].
 
 groups() ->
     [
-     {ram,  [sequence], [run_conformance]},
-     {disc, [sequence], [run_conformance]}
+     {ram,    [sequence], [run_conformance]},
+     {disc,   [sequence], [run_conformance]},
+     {facade, [sequence], [facade_update_abort,
+                           facade_update_retry,
+                           facade_create,
+                           facade_ready]}
     ].
 
 %%--------------------------------------------------------------------
@@ -73,7 +81,17 @@ init_per_group(disc, Config) ->
     ok = chf_db_mnesia:ensure_collection(?DISC_IDX_COLL, #{indexes => [<<"idx">>],
                                                            storage => disc_copies}),
     ok = chf_db_mnesia:wait_ready([?DISC_COLL, ?DISC_IDX_COLL]),
-    [{coll, ?DISC_COLL}, {idx_coll, ?DISC_IDX_COLL} | Config].
+    [{coll, ?DISC_COLL}, {idx_coll, ?DISC_IDX_COLL} | Config];
+
+init_per_group(facade, Config) ->
+    %% Facade tests run via chf_db (the generic facade), not the backend directly.
+    %% Set up a fresh in-memory Mnesia and wire the backend via persistent_term.
+    ok = setup_mnesia_ram(),
+    %% The facade reads the backend from persistent_term; ensure it is set to mnesia.
+    persistent_term:put({chf_db, backend}, chf_db_mnesia),
+    ok = chf_db:ensure_collection(facade_coll, #{storage => ram_copies}),
+    ok = chf_db_mnesia:wait_ready([facade_coll]),
+    [{coll, facade_coll} | Config].
 
 end_per_group(_Group, _Config) ->
     teardown_mnesia(),
@@ -84,10 +102,12 @@ end_per_group(_Group, _Config) ->
 %%--------------------------------------------------------------------
 
 init_per_testcase(_TestCase, Config) ->
-    Coll    = proplists:get_value(coll,     Config),
-    IdxColl = proplists:get_value(idx_coll, Config),
+    Coll = proplists:get_value(coll, Config),
     mnesia:clear_table(Coll),
-    mnesia:clear_table(IdxColl),
+    case proplists:get_value(idx_coll, Config) of
+        undefined -> ok;
+        IdxColl   -> mnesia:clear_table(IdxColl)
+    end,
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
@@ -96,6 +116,69 @@ end_per_testcase(_TestCase, _Config) ->
 %%--------------------------------------------------------------------
 %% Test cases
 %%--------------------------------------------------------------------
+
+%% Facade: update/3 abort path — Fun returns {abort, over} → {error, {aborted, over}}.
+%% Assert no retry via invocation counter: Fun must be called exactly once.
+facade_update_abort(Config) ->
+    Coll = proplists:get_value(coll, Config),
+    {ok, _} = chf_db:put(Coll, <<"upd_abort">>, #{<<"v">> => 0}),
+    Self = self(),
+    Fun = fun(_Doc) ->
+        Self ! invoked,
+        {abort, over}
+    end,
+    ?assertEqual({error, {aborted, over}}, chf_db:update(Coll, <<"upd_abort">>, Fun)),
+    %% Collect all 'invoked' messages; there must be exactly one.
+    Invocations = drain_invocations(0),
+    ?assertEqual(1, Invocations).
+
+%% Facade: update/3 retry path — inject a concurrent cas_put to force one
+%% version_conflict on the first attempt, then let it succeed.
+facade_update_retry(Config) ->
+    Coll = proplists:get_value(coll, Config),
+    {ok, _} = chf_db:put(Coll, <<"upd_retry">>, #{<<"v">> => 0}),
+    Self = self(),
+    Fun = fun(Doc) ->
+        %% On the first invocation, do a concurrent cas_put to bump the version
+        %% so that chf_db:update/3 sees a version_conflict and retries.
+        case maps:get(<<"attempt">>, Doc, first) of
+            first ->
+                %% Read current version and bump it from outside the update loop.
+                {ok, _, Vsn} = chf_db:get(Coll, <<"upd_retry">>),
+                {ok, _} = chf_db:cas_put(Coll, <<"upd_retry">>, Vsn,
+                                         #{<<"v">> => 1, <<"attempt">> => second}),
+                Self ! first_attempt,
+                {ok, Doc#{<<"v">> => 99}};
+            second ->
+                Self ! second_attempt,
+                {ok, Doc#{<<"v">> => 42}}
+        end
+    end,
+    {ok, FinalDoc, _Vsn} = chf_db:update(Coll, <<"upd_retry">>, Fun),
+    ?assertEqual(42, maps:get(<<"v">>, FinalDoc)),
+    First  = drain_invocations(0),
+    ?assert(First >= 1).
+
+%% Facade: create/3 — {ok, V} first call, {error, exists} on repeat.
+facade_create(Config) ->
+    Coll = proplists:get_value(coll, Config),
+    {ok, V} = chf_db:create(Coll, <<"create_key">>, #{<<"n">> => 1}),
+    ?assertEqual(1, V),
+    ?assertEqual({error, exists}, chf_db:create(Coll, <<"create_key">>, #{<<"n">> => 2})).
+
+%% Facade: ready/0 returns true after ensure_collection.
+facade_ready(_Config) ->
+    ?assertEqual(true, chf_db:ready()).
+
+%% Drain all 'invoked' messages from the mailbox, returning count.
+drain_invocations(N) ->
+    receive
+        invoked         -> drain_invocations(N + 1);
+        first_attempt   -> drain_invocations(N + 1);
+        second_attempt  -> drain_invocations(N + 1)
+    after 0 ->
+        N
+    end.
 
 run_conformance(Config) ->
     Coll    = proplists:get_value(coll,     Config),
