@@ -32,7 +32,10 @@ all() ->
      commit_clamps_and_stamps,
      commit_partial,
      refund_releases,
-     commit_idempotent].
+     commit_idempotent,
+     reserve_negative_rejected,
+     commit_negative_clamped,
+     reserve_two_sessions_cannot_exceed_total].
 
 %% available on an empty balance = total
 avail_of_empty(_) ->
@@ -86,3 +89,30 @@ commit_idempotent(_) ->
     {ok, D2} = (chf_balance:commit_fun(<<"s1">>, 300, <<"cdr1">>, <<"tok-commit-1">>))(D1),
     {ok, D3} = (chf_balance:commit_fun(<<"s1">>, 300, <<"cdr1">>, <<"tok-commit-1">>))(D2),
     ?assertEqual(D2, D3).   %% replay is a no-op
+
+%% a negative reserve amount is rejected without inserting a reservation or token
+reserve_negative_rejected(_) ->
+    D0 = chf_balance:to_doc(#{<<"account_id">> => <<"a1">>, <<"total">> => 1000}),
+    ?assertEqual({abort, invalid_amount},
+                 (chf_balance:reserve_fun(<<"s1">>, <<"rg">>, -50, <<"tk">>))(D0)).
+
+%% a negative commit clamps to 0: total never increases, available stays valid.
+%% UsedClamped==0 → the settle path reduces the hold by 0 (reservation still 300),
+%% a used=0 pending_cdr is appended, and the token is recorded.
+commit_negative_clamped(_) ->
+    D0 = chf_balance:to_doc(#{<<"account_id">> => <<"a1">>, <<"total">> => 1000}),
+    {ok, D1} = (chf_balance:reserve_fun(<<"s1">>, <<"rg">>, 300, <<"tk1">>))(D0),
+    {ok, D2} = (chf_balance:commit_fun(<<"s1">>, -100, <<"c1">>, <<"tk2">>))(D1),
+    ?assertEqual(1000, maps:get(<<"total">>, D2)),         %% total never increased
+    ?assertEqual(700, chf_balance:available(D2)),          %% hold of 300 unchanged
+    ?assert(chf_balance:available(D2) >= 0),
+    ?assertMatch(#{<<"s1">> := #{<<"amount">> := 300}}, maps:get(<<"reservations">>, D2)),
+    ?assertMatch([#{<<"cdr_id">> := <<"c1">>, <<"used">> := 0}], maps:get(<<"pending_cdrs">>, D2)).
+
+%% two sessions cannot jointly reserve more than total: the second aborts
+reserve_two_sessions_cannot_exceed_total(_) ->
+    D0 = chf_balance:to_doc(#{<<"account_id">> => <<"a1">>, <<"total">> => 1000}),
+    {ok, D1} = (chf_balance:reserve_fun(<<"s1">>, <<"rg">>, 700, <<"tk1">>))(D0),
+    ?assertEqual(300, chf_balance:available(D1)),
+    ?assertEqual({abort, insufficient_balance},
+                 (chf_balance:reserve_fun(<<"s2">>, <<"rg">>, 700, <<"tk2">>))(D1)).

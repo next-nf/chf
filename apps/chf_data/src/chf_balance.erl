@@ -145,13 +145,18 @@ reserved_total(Doc) ->
 
 -doc "Build a `reserve` Fun that holds `Amt` micro-units for `SessionId` under `RG`.\n"
      "Idempotent on `IdemToken`. `{abort, insufficient_balance}` if `available < Amt`.".
--spec reserve_fun(SessionId :: binary(), RG :: binary(), Amt :: non_neg_integer(),
+-spec reserve_fun(SessionId :: binary(), RG :: binary(), Amt :: integer(),
                   IdemToken :: binary()) ->
-    fun((doc()) -> {ok, doc()} | {abort, insufficient_balance}).
+    fun((doc()) -> {ok, doc()} | {abort, insufficient_balance | invalid_amount}).
 reserve_fun(SessionId, RG, Amt, IdemToken) ->
     fun(Doc) ->
         case token_applied(IdemToken, Doc) of
             true  -> {ok, Doc};
+            false when Amt < 0 ->
+                %% Invalid request: reject WITHOUT inserting a reservation or
+                %% recording the token. An invalid amount is not an at-most-once
+                %% money effect, so a replay must be free to re-evaluate.
+                {abort, invalid_amount};
             false -> do_reserve(SessionId, RG, Amt, IdemToken, Doc)
         end
     end.
@@ -176,7 +181,7 @@ do_reserve(SessionId, RG, Amt, IdemToken, Doc) ->
      "`total := total − UsedClamped`. Full commit removes the reservation; a partial\n"
      "commit (`Used < held`) leaves the residual held. Appends a `pending_cdr` stub\n"
      "tagged `CdrId`. Idempotent on `IdemToken`.".
--spec commit_fun(SessionId :: binary(), Used :: non_neg_integer(),
+-spec commit_fun(SessionId :: binary(), Used :: integer(),
                  CdrId :: binary(), IdemToken :: binary()) ->
     fun((doc()) -> {ok, doc()}).
 commit_fun(SessionId, Used, CdrId, IdemToken) ->
@@ -187,14 +192,16 @@ commit_fun(SessionId, Used, CdrId, IdemToken) ->
         end
     end.
 
--spec do_commit(binary(), non_neg_integer(), binary(), binary(), doc()) -> {ok, doc()}.
+-spec do_commit(binary(), integer(), binary(), binary(), doc()) -> {ok, doc()}.
 do_commit(SessionId, Used, CdrId, IdemToken, Doc) ->
     Reservations = maps:get(?F_RESERVATIONS, Doc, #{}),
     Reservation  = maps:get(SessionId, Reservations, undefined),
     Held         = held_amount(Reservation),
-    %% Clamp: charge at most what was reserved. This is the money guarantee —
-    %% total can only decrease, and never below (total − Held).
-    UsedClamped  = min(Used, Held),
+    %% Clamp to the non-negative held range: charge at most what was reserved,
+    %% and never a negative amount. This is the money guarantee — total can only
+    %% decrease, never below (total − Held), and a negative Used is a no-op on
+    %% total (UsedClamped = 0) rather than inflating it.
+    UsedClamped  = max(0, min(Used, Held)),
     RG           = reservation_rg(Reservation),
     Total        = maps:get(?F_TOTAL, Doc, 0),
     Reservations1 = settle_reservation(SessionId, Reservation, Held, UsedClamped,
@@ -253,8 +260,7 @@ held_amount(#{?F_AMOUNT := Amt})           -> Amt.
 
 -spec reservation_rg(reservation() | undefined) -> binary().
 reservation_rg(undefined)                  -> <<>>;
-reservation_rg(#{?F_RATING_GROUP := RG})   -> RG;
-reservation_rg(_)                          -> <<>>.
+reservation_rg(#{?F_RATING_GROUP := RG})   -> RG.
 
 %%------------------------------------------------------------------------------
 %% Idempotency ring
