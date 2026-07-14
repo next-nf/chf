@@ -196,7 +196,6 @@ build_cca(SessionId, OriginHost, OriginRealm, ReqType, ReqNumber, Result) ->
 
 %% map the charging result to a metric-friendly outcome atom
 outcome_atom({ok, _})                          -> success;
-outcome_atom({error, ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED'}) -> insufficient_balance;
 outcome_atom({error, ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN'})         -> user_unknown;
 outcome_atom({error, ?'DIAMETER_BASE_RESULT-CODE_UNKNOWN_SESSION_ID'}) -> unknown_session;
 outcome_atom({error, _})                       -> unable_to_comply.
@@ -205,8 +204,12 @@ outcome_atom({error, _})                       -> unable_to_comply.
 %% Error code mapping
 %%====================================================================
 
-error_code(no_quorum)            -> ?'DIAMETER_BASE_RESULT-CODE_TOO_BUSY';
-error_code(insufficient_balance) -> ?'DIAMETER_RO_RESULT-CODE_CREDIT_LIMIT_REACHED';
+%% NOTE (Phase 1 data-layer cutover): chf_core no longer surfaces `no_quorum`
+%% (the quorum gate is retired — reintroduced deliberately in Phase 2) nor a bare
+%% `insufficient_balance` (online charging absorbs credit exhaustion into the
+%% per-RG grant outcome, returning {ok, OutcomeMap}). Those defensive clauses were
+%% therefore removed; the `_` catch-all maps any unexpected reason to
+%% UNABLE_TO_COMPLY.
 error_code(subscriber_suspended) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
 error_code(subscriber_terminated) -> ?'DIAMETER_RO_RESULT-CODE_END_USER_SERVICE_DENIED';
 error_code(subscriber_not_found) -> ?'DIAMETER_RO_RESULT-CODE_USER_UNKNOWN';

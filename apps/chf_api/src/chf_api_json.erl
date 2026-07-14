@@ -20,8 +20,6 @@
 %% Uses Erlang/OTP 27+ built-in `json` module.
 -module(chf_api_json).
 
--include_lib("chf_db/include/chf_db.hrl").
-
 -export([decode/1, encode/1]).
 -export([encode_subscriber/1, encode_balance/1]).
 
@@ -50,41 +48,34 @@ encode(Term) ->
     iolist_to_binary(json:encode(Term)).
 
 %%====================================================================
-%% Record → map helpers
+%% Domain-map → JSON helpers
 %%====================================================================
 
-%% @doc Encode a #subscriber{} record to a JSON binary.
--spec encode_subscriber(#subscriber{}) -> binary().
-encode_subscriber(#subscriber{
-        imsi          = Imsi,
-        msisdn        = Msisdn,
-        account_id    = AccountId,
-        status        = Status,
-        rating_groups = RatingGroups,
-        created_at    = CreatedAt,
-        updated_at    = UpdatedAt}) ->
+%% @doc Encode a subscriber map (binary keys) to a JSON binary.
+-spec encode_subscriber(map()) -> binary().
+encode_subscriber(Sub) ->
     Map = #{
-        <<"imsi">>          => Imsi,
-        <<"msisdn">>        => Msisdn,
-        <<"account_id">>    => AccountId,
-        <<"status">>        => atom_to_binary(Status, utf8),
-        <<"rating_groups">> => encode_rating_groups(RatingGroups),
-        <<"created_at">>    => CreatedAt,
-        <<"updated_at">>    => UpdatedAt
+        <<"imsi">>          => maps:get(<<"imsi">>, Sub, <<>>),
+        <<"msisdn">>        => maps:get(<<"msisdn">>, Sub, <<>>),
+        <<"account_id">>    => maps:get(<<"account_id">>, Sub, <<>>),
+        <<"status">>        => maps:get(<<"status">>, Sub, <<"active">>),
+        <<"rating_groups">> => encode_rating_groups(maps:get(<<"rating_groups">>, Sub, #{})),
+        <<"created_at">>    => maps:get(<<"created_at">>, Sub, 0),
+        <<"updated_at">>    => maps:get(<<"updated_at">>, Sub, 0)
     },
     encode(Map).
 
-%% @doc Encode a #balance{} record to a JSON binary.
--spec encode_balance(#balance{}) -> binary().
-encode_balance(#balance{
-        account_id = AccountId,
-        total      = Total,
-        reserved   = Reserved,
-        available  = Available}) ->
+%% @doc Encode a balance map (binary keys) to a JSON binary. `available` is the
+%% derived total − Σ reservations (chf_balance:available/1); `reserved` is that
+%% derived hold total, exposed for API compatibility.
+-spec encode_balance(map()) -> binary().
+encode_balance(Bal) ->
+    Total     = maps:get(<<"total">>, Bal, 0),
+    Available = chf_balance:available(Bal),
     Map = #{
-        <<"account_id">> => AccountId,
+        <<"account_id">> => maps:get(<<"account_id">>, Bal, <<>>),
         <<"total">>      => Total,
-        <<"reserved">>   => Reserved,
+        <<"reserved">>   => Total - Available,
         <<"available">>  => Available
     },
     encode(Map).

@@ -61,7 +61,7 @@
            "replayed after 64 subsequent operations on the same account.".
 
 -export([from_doc/1, to_doc/1,
-         available/1,
+         available/1, reserved_total/1,
          reserve_fun/4, commit_fun/4, refund_fun/2]).
 
 -define(SCHEMA_VERSION, 1).
@@ -133,6 +133,7 @@ available(Doc) ->
     Total = maps:get(?F_TOTAL, Doc, 0),
     Total - reserved_total(Doc).
 
+-doc "Sum of all reservation amounts held on the balance (the derived `reserved`).".
 -spec reserved_total(doc()) -> non_neg_integer().
 reserved_total(Doc) ->
     Reservations = maps:get(?F_RESERVATIONS, Doc, #{}),

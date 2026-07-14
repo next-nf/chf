@@ -15,87 +15,43 @@
 %% You should have received a copy of the GNU Affero General Public License
 %% along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-%% chf_offline.erl — Stateless offline charging logic (CDR generation).
+%% chf_offline.erl — Offline charging logic (CDR generation).
 %%
-%% Called by chf_session for offline/converged sessions.
-%% CDRs are written via chf_db:cdr_write/1.
+%% Phase 1 (data-layer cutover): CDRs are NO LONGER written inline here. The
+%% authoritative money path stamps `pending_cdrs` onto the balance document at
+%% commit time (chf_data:balance_commit/5), and the Task 5 drainer materialises
+%% durable CDRs from those stubs. The descriptive charging_session (written by
+%% chf_core) carries the reporting-only usage.
+%%
+%% For a PURE offline session (no online grant/commit, hence no balance mutation
+%% and no pending_cdr stub) there is nothing to charge; usage is captured on the
+%% descriptive session and the offline-CDR reconstruction is a Task 5 concern.
+%% These entry points are therefore Phase-1 no-ops that keep the chf_core
+%% dispatch shape stable; they will be re-fleshed when the offline CDR pipeline
+%% lands. They deliberately take only descriptive inputs (no Ctx, no records).
 -module(chf_offline).
 
--include_lib("chf_db/include/chf_db.hrl").
-
--export([initial_request/3, update_request/3, terminate_request/3]).
+-export([initial_request/2, update_request/2, terminate_request/2]).
 
 %%====================================================================
-%% API
+%% API — Phase 1 no-ops (see moduledoc)
 %%====================================================================
 
-%% @doc Create initial CDR metadata for a session.
-%%
-%% For offline charging the initial request simply records that the
-%% session has started.  A CDR with zero usage is written per
-%% RatingGroup so that downstream mediation can correlate records.
--spec initial_request(Ctx :: term(), Imsi :: binary(), SessionId :: binary()) -> ok.
-initial_request(Ctx, Imsi, SessionId) ->
-    %% Write a single "session-open" CDR with no usage details.
-    Cdr = #cdr{
-        id           = chf_db:cdr_generate_id(),
-        session_id   = SessionId,
-        imsi         = Imsi,
-        type         = offline,
-        rating_group = 0,
-        used_units   = #{input => 0, output => 0, total => 0},
-        timestamp    = erlang:system_time(millisecond),
-        metadata     = #{event => session_start}
-    },
-    chf_db:cdr_write(Ctx, Cdr).
+%% @doc Session-open marker for an offline/converged session. No inline CDR.
+-spec initial_request(Imsi :: binary(), SessionId :: binary()) -> ok.
+initial_request(_Imsi, _SessionId) ->
+    ok.
 
-%% @doc Write a partial (interim) CDR for each RatingGroup.
+%% @doc Interim usage marker. No inline CDR (commit stamps pending_cdrs).
 %%
 %% Data :: #{session_id => binary(),
-%%           rating_groups => [#{rating_group  => non_neg_integer(),
-%%                               used_units    => integer()}]}
-%% Returns ok; inside a session_transaction a cdr_write failure aborts the
-%% enclosing transaction (atomic charge+CDR) rather than returning an error.
--spec update_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok.
-update_request(Ctx, Imsi, Data) ->
-    SessionId    = maps:get(session_id, Data),
-    RatingGroups = maps:get(rating_groups, Data, []),
-    write_usage_cdrs(Ctx, Imsi, SessionId, RatingGroups, interim).
+%%           rating_groups => [#{rating_group => non_neg_integer(),
+%%                               used_units => integer()}]}
+-spec update_request(Imsi :: binary(), Data :: map()) -> ok.
+update_request(_Imsi, _Data) ->
+    ok.
 
-%% @doc Write final CDRs with all usage at session termination.
-%%
-%% Data :: #{session_id => binary(),
-%%           rating_groups => [#{rating_group  => non_neg_integer(),
-%%                               used_units    => integer()}]}
--spec terminate_request(Ctx :: term(), Imsi :: binary(), Data :: map()) -> ok.
-terminate_request(Ctx, Imsi, Data) ->
-    SessionId    = maps:get(session_id, Data),
-    RatingGroups = maps:get(rating_groups, Data, []),
-    write_usage_cdrs(Ctx, Imsi, SessionId, RatingGroups, session_stop).
-
-%%====================================================================
-%% Internal helpers
-%%====================================================================
-
-%% Write one usage CDR per RatingGroup.  The Ctx-aware cdr_write/2 runs inside
-%% the parent Mnesia activity and returns ok unconditionally; any storage failure
-%% manifests as a transaction abort rather than an {error, _} return, so no
-%% error accumulation is needed here.
--spec write_usage_cdrs(term(), binary(), binary(), [map()], atom()) -> ok.
-write_usage_cdrs(Ctx, Imsi, SessionId, RatingGroups, Event) ->
-    Now = erlang:system_time(millisecond),
-    lists:foreach(fun(RG) ->
-        RGId = maps:get(rating_group, RG),
-        Used = maps:get(used_units, RG, 0),
-        Cdr = #cdr{
-            id           = chf_db:cdr_generate_id(),
-            session_id   = SessionId,
-            imsi         = Imsi,
-            type         = offline,
-            rating_group = RGId,
-            used_units   = #{input => 0, output => 0, total => Used},
-            timestamp    = Now,
-            metadata     = #{event => Event}
-        },
-        ok = chf_db:cdr_write(Ctx, Cdr)
-    end, RatingGroups).
+%% @doc Final usage marker at session stop. No inline CDR.
+-spec terminate_request(Imsi :: binary(), Data :: map()) -> ok.
+terminate_request(_Imsi, _Data) ->
+    ok.

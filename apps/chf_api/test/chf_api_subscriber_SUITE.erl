@@ -20,7 +20,6 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
--include_lib("chf_db/include/chf_db.hrl").
 
 all() ->
     [put_unknown_imsi_404,
@@ -58,18 +57,20 @@ init_per_testcase(_TC, Config) ->
 
 end_per_testcase(_TC, Config) ->
     gun:close(?config(conn, Config)),
+    catch gen_server:stop(chf_db_mnesia),
     mnesia:stop(),
     ok.
 
 setup_mnesia() ->
     application:set_env(chf_db, backend, chf_db_mnesia),
-    persistent_term:erase({chf_db, backend}),
+    application:set_env(chf_db, backend_opts, #{storage => ram_copies}),
+    persistent_term:put({chf_db, backend}, chf_db_mnesia),
+    catch gen_server:stop(chf_db_mnesia),
     mnesia:stop(),
     ok = mnesia:start(),
-    {atomic, ok} = mnesia:create_table(subscriber,
-        [{attributes, record_info(fields, subscriber)}, {index, [#subscriber.msisdn]}]),
-    {atomic, ok} = mnesia:create_table(balance,
-        [{attributes, record_info(fields, balance)}]),
+    {ok, _Pid} = chf_db_mnesia:start_link(#{}),
+    ok = chf_data:ensure_collections(),
+    ok = chf_db_mnesia:wait_ready([subscriber, balance, charging_session, cdr]),
     ok.
 
 req(ConnPid, Method, Path, Body) ->

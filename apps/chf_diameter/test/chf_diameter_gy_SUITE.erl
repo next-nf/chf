@@ -63,8 +63,7 @@ all() ->
      ccr_initial_multi_mscc,
      ccr_mscc_full_grant_no_fui,
      ccr_mscc_final_grant_has_fui,
-     ccr_mscc_credit_limit_has_fui_4012,
-     ccr_initial_no_quorum_too_busy].
+     ccr_mscc_credit_limit_has_fui_4012].
 
 init_per_suite(Config) ->
     Config.
@@ -335,14 +334,7 @@ ccr_mscc_credit_limit_has_fui_4012(_Config) ->
     ?assertEqual([0], FUI#'diameter_ro_Final-Unit-Indication'.'Final-Unit-Action'),
     ?assertEqual([],  MSCC#'diameter_ro_Multiple-Services-Credit-Control'.'Granted-Service-Unit').
 
-%% When chf_core:session_initial returns {error, no_quorum}, the CCA command-level
-%% Result-Code must be 3004 (TOO_BUSY).  The handler also calls session_terminate
-%% to clean up the session created before the quorum check — mock it too.
-ccr_initial_no_quorum_too_busy(_Config) ->
-    meck:expect(chf_core, create_session,  fun(_) -> {ok, <<"s">>} end),
-    meck:expect(chf_core, session_initial, fun(_, _) -> {error, no_quorum} end),
-    meck:expect(chf_core, session_terminate, fun(_, _) -> ok end),
-    SubId = make_sub_id_imsi(<<"001010123456789">>),
-    CCR   = make_ccr(<<"s">>, ?CCR_INITIAL, [SubId], [make_mscc(1, 1000, 0)]),
-    ?assertMatch({reply, #diameter_ro_CCA{'Result-Code' = ?DIAMETER_TOO_BUSY}},
-                 call_handler(CCR)).
+%% (Retired in the Phase 1 data-layer cutover: the quorum gate is gone, so
+%% chf_core no longer returns {error, no_quorum} and the TOO_BUSY mapping was
+%% removed. The Phase 2 syn-based cluster will reintroduce the gate and a matching
+%% test deliberately.)

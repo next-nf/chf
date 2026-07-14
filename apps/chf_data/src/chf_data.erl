@@ -33,6 +33,8 @@
          subscriber_delete/1,
          %% Balance
          balance_get/1, balance_reserve/5, balance_commit/5, balance_refund/3,
+         %% Balance provisioning (operator-facing, distinct from the money ops)
+         balance_topup/2, balance_set_total/2,
          %% Session (descriptive-only)
          session_store/1, session_lookup/1, session_delete/1, session_list_active/0,
          %% CDR
@@ -147,6 +149,54 @@ balance_commit(AccountId, SessionId, Used, CdrId, IdemToken) ->
 balance_refund(AccountId, SessionId, IdemToken) ->
     Fun = chf_balance:refund_fun(SessionId, IdemToken),
     apply_balance_update(AccountId, Fun).
+
+-doc "Operator provisioning: add `Amt` funded micro-units to `AccountId`'s balance,\n"
+     "creating an empty row first if none exists. `Amt` must be non-negative. A zero\n"
+     "top-up just materialises the row. Returns the resulting balance map.".
+-spec balance_topup(AccountId :: binary(), Amt :: non_neg_integer()) ->
+    {ok, balance_map()} | {error, invalid_amount} | {error, term()}.
+balance_topup(_AccountId, Amt) when not is_integer(Amt); Amt < 0 ->
+    {error, invalid_amount};
+balance_topup(AccountId, Amt) ->
+    ok = ensure_balance_row(AccountId),
+    Fun = fun(Doc) ->
+              Total = maps:get(<<"total">>, Doc, 0),
+              {ok, Doc#{<<"total">> => Total + Amt}}
+          end,
+    case chf_db:update(?BALANCE, AccountId, Fun) of
+        {ok, Doc, _V}  -> {ok, chf_balance:from_doc(Doc)};
+        {error, _} = E -> E
+    end.
+
+-doc "Operator provisioning: set the absolute funded total for `AccountId`, creating\n"
+     "the row if absent. Fails with `{error, total_below_reserved}` if the new total\n"
+     "would be below the currently-held reservations (which would break the available\n"
+     "invariant). Returns the resulting balance map.".
+-spec balance_set_total(AccountId :: binary(), NewTotal :: non_neg_integer()) ->
+    {ok, balance_map()} | {error, total_below_reserved} | {error, term()}.
+balance_set_total(AccountId, NewTotal) ->
+    ok = ensure_balance_row(AccountId),
+    Fun = fun(Doc) ->
+              case NewTotal < chf_balance:reserved_total(Doc) of
+                  true  -> {abort, total_below_reserved};
+                  false -> {ok, Doc#{<<"total">> => NewTotal}}
+              end
+          end,
+    case chf_db:update(?BALANCE, AccountId, Fun) of
+        {ok, Doc, _V}                           -> {ok, chf_balance:from_doc(Doc)};
+        {error, {aborted, total_below_reserved}} -> {error, total_below_reserved};
+        {error, _} = E                          -> E
+    end.
+
+%% Insert an empty balance row for AccountId if none exists. Idempotent.
+-spec ensure_balance_row(binary()) -> ok.
+ensure_balance_row(AccountId) ->
+    Doc = chf_balance:to_doc(#{<<"account_id">> => AccountId, <<"total">> => 0}),
+    case chf_db:create(?BALANCE, AccountId, Doc) of
+        {ok, _V}        -> ok;
+        {error, exists} -> ok;
+        {error, _} = E  -> E
+    end.
 
 %% Run a money Fun through the CAS-updating facade and normalise the result to the
 %% caller-facing shape. `{error, {aborted, insufficient_balance}}` — the only abort

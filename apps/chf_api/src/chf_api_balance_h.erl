@@ -23,8 +23,6 @@
 %%   PUT   /api/v1/subscribers/:imsi/balance — set absolute balance
 -module(chf_api_balance_h).
 
--include_lib("chf_db/include/chf_db.hrl").
-
 -export([init/2,
          allowed_methods/2,
          content_types_provided/2,
@@ -37,7 +35,7 @@
 -record #state{
     imsi       = undefined :: binary(),
     account_id = undefined :: binary() | undefined,
-    balance    = undefined :: #balance{} | undefined
+    balance    = undefined :: map() | undefined
 }.
 
 %%====================================================================
@@ -58,9 +56,9 @@ content_types_accepted(Req, State) ->
     {[{<<"application/json">>, from_json}], Req, State}.
 
 resource_exists(Req, #state{imsi = Imsi} = State) ->
-    case chf_db:subscriber_lookup(Imsi) of
-        {ok, #subscriber{account_id = AccountId}} ->
-            case chf_db:balance_get(AccountId) of
+    case chf_data:subscriber_lookup(Imsi) of
+        {ok, #{<<"account_id">> := AccountId}} ->
+            case chf_data:balance_get(AccountId) of
                 {ok, Balance} ->
                     {true, Req, State#state{account_id = AccountId,
                                             balance = Balance}};
@@ -113,7 +111,7 @@ from_json(Req, State) ->
 handle_put(Fields, Req, #state{account_id = AccountId} = State) ->
     case maps:find(<<"total">>, Fields) of
         {ok, NewTotal} when is_integer(NewTotal), NewTotal >= 0 ->
-            Result = chf_db:balance_set_total(AccountId, NewTotal),
+            Result = chf_data:balance_set_total(AccountId, NewTotal),
             respond_with_balance(Result, Req, State);
         {ok, _} ->
             reply_error(400, <<"total must be a non-negative integer">>, Req, State);
@@ -140,15 +138,28 @@ handle_patch(Fields, Req, #state{account_id = AccountId} = State) ->
 %% Helpers
 %%====================================================================
 
-%% Apply a balance delta: positive = topup, negative = reserve+commit (debit).
+%% Apply a balance delta: positive = topup, negative = debit (lower the funded
+%% total). A debit is expressed as an absolute set_total(current − Abs); the seam
+%% rejects a total below the currently-held reservations with total_below_reserved
+%% (surfaced as 409 insufficient balance).
 apply_delta(AccountId, Amount) when Amount >= 0 ->
-    chf_db:balance_topup(AccountId, Amount);
+    chf_data:balance_topup(AccountId, Amount);
 apply_delta(AccountId, Amount) ->
     Abs = -Amount,
-    case chf_db:balance_reserve(AccountId, Abs) of
-        {ok, _} -> chf_db:balance_commit(AccountId, Abs);
-        Err     -> Err
+    case chf_data:balance_get(AccountId) of
+        {ok, Bal} ->
+            NewTotal = maps:get(<<"total">>, Bal, 0) - Abs,
+            case NewTotal >= 0 of
+                true  -> normalise(chf_data:balance_set_total(AccountId, NewTotal));
+                false -> {error, insufficient_balance}
+            end;
+        {error, not_found} ->
+            {error, insufficient_balance}
     end.
+
+%% Map the seam's provisioning error onto the handler vocabulary.
+normalise({error, total_below_reserved}) -> {error, insufficient_balance};
+normalise(Other)                         -> Other.
 
 respond_with_balance({ok, Balance}, Req, State) ->
     Body = chf_api_json:encode_balance(Balance),

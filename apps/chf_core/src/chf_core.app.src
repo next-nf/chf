@@ -18,7 +18,7 @@
 {application, chf_core, [
     {vsn, semver},
     {description, "Next-CHF Core Charging Engine"},
-    {applications, [kernel, stdlib, chf_db, chf_otel]},
+    {applications, [kernel, stdlib, chf_db, chf_data, chf_otel]},
     {mod, {chf_core_app, []}},
     {registered, []}
 ]}.

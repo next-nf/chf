@@ -23,12 +23,14 @@
 %% take over via global:register_name. The active node performs the periodic
 %% sweep; standby nodes ignore sweep timer messages.
 %%
-%% Quorum-gating: the active sweeper skips the scan when chf_cluster:in_quorum/0
-%% is false.  A minority-partition node must not terminate or refund sessions.
+%% Phase 1 is single-node: there is no cluster quorum gate (the syn-based
+%% chf_cluster is a Phase 2 concern). Correctness rests on version-CAS on the
+%% authoritative balance document. The sweep terminates stale descriptive
+%% sessions; chf_core:session_terminate_if_stale releases (refunds) the balance
+%% reservation for each session it ends.
 -module(chf_session_sweeper).
 -behaviour(gen_server).
 
--include_lib("chf_db/include/chf_db.hrl").
 -include_lib("kernel/include/logger.hrl").
 
 -export([start_link/0]).
@@ -121,21 +123,12 @@ schedule(Interval) ->
     erlang:send_after(Interval, self(), sweep).
 
 sweep(MaxAge) ->
-    case chf_cluster:in_quorum() of
-        false ->
-            ?LOG_DEBUG("Session sweeper: skipping scan (not in quorum)"),
-            ok;
-        true ->
-            case chf_db:session_list_active() of
-                {ok, Sessions} ->
-                    lists:foreach(fun(#charging_session{session_id = SId}) ->
-                        case chf_core:session_terminate_if_stale(SId, MaxAge) of
-                            ok      -> ?LOG_INFO("Sweeper: terminated stale session ~s", [SId]);
-                            skipped -> ok;
-                            _Other  -> ok
-                        end
-                    end, Sessions);
-                _Error ->
-                    ok
-            end
-    end.
+    {ok, Sessions} = chf_data:session_list_active(),
+    lists:foreach(fun(S) ->
+        SId = maps:get(<<"session_id">>, S),
+        case chf_core:session_terminate_if_stale(SId, MaxAge) of
+            ok      -> ?LOG_INFO("Sweeper: terminated stale session ~s", [SId]);
+            skipped -> ok;
+            _Other  -> ok
+        end
+    end, Sessions).
