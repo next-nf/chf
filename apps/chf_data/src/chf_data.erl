@@ -158,13 +158,16 @@ balance_refund(AccountId, SessionId, IdemToken) ->
 balance_topup(_AccountId, Amt) when not is_integer(Amt); Amt < 0 ->
     {error, invalid_amount};
 balance_topup(AccountId, Amt) ->
-    ok = ensure_balance_row(AccountId),
-    Fun = fun(Doc) ->
-              Total = maps:get(<<"total">>, Doc, 0),
-              {ok, Doc#{<<"total">> => Total + Amt}}
-          end,
-    case chf_db:update(?BALANCE, AccountId, Fun) of
-        {ok, Doc, _V}  -> {ok, chf_balance:from_doc(Doc)};
+    case ensure_balance_row(AccountId) of
+        ok ->
+            Fun = fun(Doc) ->
+                      Total = maps:get(<<"total">>, Doc, 0),
+                      {ok, Doc#{<<"total">> => Total + Amt}}
+                  end,
+            case chf_db:update(?BALANCE, AccountId, Fun) of
+                {ok, Doc, _V}  -> {ok, chf_balance:from_doc(Doc)};
+                {error, _} = E -> E
+            end;
         {error, _} = E -> E
     end.
 
@@ -175,17 +178,20 @@ balance_topup(AccountId, Amt) ->
 -spec balance_set_total(AccountId :: binary(), NewTotal :: non_neg_integer()) ->
     {ok, balance_map()} | {error, total_below_reserved} | {error, term()}.
 balance_set_total(AccountId, NewTotal) ->
-    ok = ensure_balance_row(AccountId),
-    Fun = fun(Doc) ->
-              case NewTotal < chf_balance:reserved_total(Doc) of
-                  true  -> {abort, total_below_reserved};
-                  false -> {ok, Doc#{<<"total">> => NewTotal}}
-              end
-          end,
-    case chf_db:update(?BALANCE, AccountId, Fun) of
-        {ok, Doc, _V}                           -> {ok, chf_balance:from_doc(Doc)};
-        {error, {aborted, total_below_reserved}} -> {error, total_below_reserved};
-        {error, _} = E                          -> E
+    case ensure_balance_row(AccountId) of
+        ok ->
+            Fun = fun(Doc) ->
+                      case NewTotal < chf_balance:reserved_total(Doc) of
+                          true  -> {abort, total_below_reserved};
+                          false -> {ok, Doc#{<<"total">> => NewTotal}}
+                      end
+                  end,
+            case chf_db:update(?BALANCE, AccountId, Fun) of
+                {ok, Doc, _V}                           -> {ok, chf_balance:from_doc(Doc)};
+                {error, {aborted, total_below_reserved}} -> {error, total_below_reserved};
+                {error, _} = E                          -> E
+            end;
+        {error, _} = E -> E
     end.
 
 -doc "Test/ops helper: create-or-raise the balance total for `AccountId` to `Total`.\n"
@@ -197,21 +203,26 @@ balance_set_total(AccountId, NewTotal) ->
 -spec balance_topup_or_set(AccountId :: binary(), Total :: non_neg_integer()) ->
     {ok, balance_map()} | {error, term()}.
 balance_topup_or_set(AccountId, Total) ->
-    ok = ensure_balance_row(AccountId),
-    Fun = fun(Doc) ->
-              Current = maps:get(<<"total">>, Doc, 0),
-              case Current >= Total of
-                  true  -> {ok, Doc};
-                  false -> {ok, Doc#{<<"total">> => Total}}
-              end
-          end,
-    case chf_db:update(?BALANCE, AccountId, Fun) of
-        {ok, Doc, _V}  -> {ok, chf_balance:from_doc(Doc)};
+    case ensure_balance_row(AccountId) of
+        ok ->
+            Fun = fun(Doc) ->
+                      Current = maps:get(<<"total">>, Doc, 0),
+                      case Current >= Total of
+                          true  -> {ok, Doc};
+                          false -> {ok, Doc#{<<"total">> => Total}}
+                      end
+                  end,
+            case chf_db:update(?BALANCE, AccountId, Fun) of
+                {ok, Doc, _V}  -> {ok, chf_balance:from_doc(Doc)};
+                {error, _} = E -> E
+            end;
         {error, _} = E -> E
     end.
 
 %% Insert an empty balance row for AccountId if none exists. Idempotent.
--spec ensure_balance_row(binary()) -> ok.
+%% Returns ok when the row exists (either just created or already present);
+%% returns {error, Reason} only for genuine infrastructure errors.
+-spec ensure_balance_row(binary()) -> ok | {error, term()}.
 ensure_balance_row(AccountId) ->
     Doc = chf_balance:to_doc(#{<<"account_id">> => AccountId, <<"total">> => 0}),
     case chf_db:create(?BALANCE, AccountId, Doc) of
