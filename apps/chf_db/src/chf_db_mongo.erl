@@ -18,6 +18,11 @@
 %% chf_db_mongo.erl — MongoDB backend for chf_db, implementing the
 %% chf_db_backend behaviour (all 23 callbacks).
 %%
+%% NOTE: The -behaviour(chf_db_backend) declaration was removed in Task 1
+%% of the data-layer migration (branch e3-chf-data-layer-mnesia).  The
+%% chf_db_backend behaviour was replaced with the 11-callback generic contract;
+%% chf_db_mongo will be ported to the new contract in a later task.
+%%
 %% Connection ownership and supervision
 %% -------------------------------------
 %% mongoc:connect/3 calls mc_topology:start_link internally, which links the
@@ -36,7 +41,6 @@
 %%     re-run of ensure_indexes so per-testcase collection drops get fresh indexes.
 %%   • In tests (no supervisor): starts the gen_server as a standalone process.
 -module(chf_db_mongo).
--behaviour(chf_db_backend).
 
 -include_lib("chf_db/include/chf_db.hrl").
 
